@@ -1,0 +1,24 @@
+{
+  "v": 1,
+  "seq": 128,
+  "event": "DEPLOY_PROGRESS",
+  "timestamp": "2026-11-10T23:10:05Z",
+  "payload": {
+    "task_id": "task_9981",
+    "master_ip": "192.168.1.100",
+    "speed_mbps": 105.2,
+    "clients": [
+      {
+        "ip": "192.168.1.101",
+        "progress": 68.5,
+        "status": "DEPLOYING"
+      },
+      {
+        "ip": "192.168.1.102",
+        "progress": 68.5,
+        "status": "DEPLOYING"
+      }
+    ]
+  }
+}
+

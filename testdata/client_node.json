@@ -1,0 +1,24 @@
+{
+  "client_id": "cli_9f2c4b1e8a7d4c3f",
+  "current_ip": "192.168.1.101",
+  "mac_address": "AA:BB:CC:11:22:33",
+  "mac_source": "AGENT",
+  "hostname": "LAB-PC-01",
+  "os_edition": "Windows 11 Education",
+  "agent_version": "0.1.0",
+  "pe_ready": true,
+  "group_id": "grp_row_1",
+  "status": "ONLINE_WINDOWS",
+  "auto_restore_on_reboot": true,
+  "active_point_id": "rp_20261110_01",
+  "restore_point_ids": [
+    "rp_base",
+    "rp_20261110_01"
+  ],
+  "network_snapshot": {},
+  "last_task_id": null,
+  "progress_percent": null,
+  "error_message": null,
+  "last_seen": "2026-11-10T23:04:00Z"
+}
+

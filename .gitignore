@@ -1,0 +1,35 @@
+# Binaries and build artifacts
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+
+# Node / Web
+node_modules/
+dist/
+.pnpm-store/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# WinPE / Image temporary files
+C:\WinPE_*
+*.wim
+*.vhdx
+*.vhd
+
+# SQLite temporary files
+*.db-wal
+*.db-shm
+

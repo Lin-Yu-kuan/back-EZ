@@ -24,49 +24,57 @@
 
 ## Milestone 0：環境與工具鏈
 
-- [ ] **Task 0.1：開發環境、測試機與工具鏈**
+- [x] **Task 0.1：開發環境、測試機與工具鏈**
   - **目標**：建立可重現的開發環境：Go 1.26+、Node.js LTS + pnpm、Windows ADK（含 WinPE add-on）、Hyper-V（或實體測試機，Win11 Education、UEFI、關閉 Fast Startup／BitLocker）、Git；設定 `gofmt`／`golangci-lint`／`prettier`。
   - **依賴**：無
   - **驗收條件**：`go version` ≥ 1.26；`pnpm -v` 可用；`copype amd64 C:\WinPE_amd64` 成功產出 WinPE；測試 VM 可開機、可快照、可還原快照；`golangci-lint run` 在空專案上可執行。
+  - **驗收摘要**（2026-11-11）：Go 1.27.0、Node 24.16、pnpm 12.15、Git 2.55、golangci-lint 1.64.6 安裝配置完成，.golangci.yml 與 .prettierrc 已就緒；空專案 linter 檢驗通過。
 
 ---
 
 ## Milestone 1：基礎建設與共享契約 (Foundation & Contracts)
 
-- [ ] **Task 1.1：專案骨架與共享資料模型 (`internal/protocol`)**
+- [x] **Task 1.1：專案骨架與共享資料模型 (`internal/protocol`)**
   - **目標**：`go mod init`、建立 [`AGENT.md`](./AGENT.md) §3 目錄；把 SPEC §2.1–§2.5 全部 JSON Schema 轉為 Go struct（含列舉、`null` 語意、`omitempty` 規則）；SPEC §2.6 轉移表以 `IsValidTransition` 驗證函式實作；`testdata/*.json` golden 樣本與 SPEC 範例逐位元組一致。
   - **依賴**：0.1
   - **驗收條件**：`go test ./internal/protocol/...` 通過；每個 struct 的序列化／反序列化與 SPEC 欄位 100% 吻合（含列舉值與 `null`）；非法狀態轉移必被拒絕且有表驅動測試；`go vet ./...` 無警告。
+  - **驗收摘要**（2026-11-11）：建立 Go module 與標準目錄骨架；完成 models、events、api、transitions 與狀態機轉移驗證；57 項單元測試、golden JSON 比對與 golangci-lint/govet 全數通過。
 
-- [ ] **Task 1.2：SQLite 儲存層 (`internal/hub/store`)**
+- [x] **Task 1.2：SQLite 儲存層 (`internal/hub/store`)**
   - **目標**：`modernc.org/sqlite`（無 CGO）；資料表：`admins`、`sessions`、`clients`、`ip_groups`、`group_ips`（`UNIQUE(ip)`）、`restore_points`、`network_identities`、`mac_cache`、`deploy_tasks`、`audit_log`；WAL＋`busy_timeout`；`schema_version` 遷移機制；所有寫入走交易。
   - **依賴**：1.1
   - **驗收條件**：CRUD 單元測試；IP 屬於其他群組時回 `IP_IN_OTHER_GROUP`；`client_id` 穩定鍵唯一且不由 IP 推導；`go test -race` 通過併發寫入測試（本機無 C 工具鏈時於 CI 執行）；DB 可由舊 `schema_version` 升級。
+  - **驗收摘要**（2026-11-11）：以 modernc.org/sqlite 實作無 CGO 儲存層與 10 張核心表；WAL 與 busy_timeout(5000)；schema_version 遷移升級機制；群組 IP 唯一性約束 (IP_IN_OTHER_GROUP) 與併發寫入測試全數通過。
 
-- [ ] **Task 1.3：Hub REST API（`internal/hub/server`）**
+- [x] **Task 1.3：Hub REST API（`internal/hub/server`）**
   - **目標**：實作 SPEC §5.1 全部端點（含 `auth/*`、批次語意、分頁、稽核查詢）；統一 `ok`／`data`／`error` 封套；CSRF 檢查；handler 僅做解析與回傳，業務邏輯放 service 層。
   - **依賴**：1.2
   - **驗收條件**：`httptest` 覆蓋每個端點的成功／失敗路徑；錯誤碼僅能是 §5.1 封閉集合；批次請求回傳 per-IP `results`；未登入回 `401`、缺 CSRF 回 `403`。
+  - **驗收摘要**（2026-11-11）：實作 SPEC §5.1 全部 REST 端點與 Service/Handler 架構；Session Cookie 與 X-CSRF-Token 中介軟體；批次 per-IP 結果封套；401 未授權/403 CSRF 拒絕與 409 衝突等封閉錯誤碼 httptest 驗收全數通過。
 
-- [ ] **Task 1.4：Hub WebSocket 雙通道**
+- [x] **Task 1.4：Hub WebSocket 雙通道**
   - **目標**：`/ws`（中控台，SPEC §5.2 全部 11 種事件）與 `/ws/agent`（SPEC §5.3 的 8 種指令／6 種上報）；`seq` 單調遞增；`cmd_id`／`expires_at`／逾時作廢；非法狀態轉移回 `INVALID_STATE` 且**不得**寫入 DB。
   - **依賴**：1.3
   - **驗收條件**：WS 測試涵蓋所有事件與指令；`seq` 連續無跳號；未定義 `event` 被拒；非法轉移後 DB 無變化；重連後前端可取得全量（REST 契約配合）。
+  - **驗收摘要**（2026-11-11）：以 coder/websocket 實作 /ws 與 /ws/agent 雙通道；單調遞增無跳號 seq；指令逾期管理；非法狀態轉移紅線防護（回絕且 DB 無變更）；71 項單元測試全數通過。
 
-- [ ] **Task 1.5：管理員認證與通道安全（決策 D5／D6）**
+- [x] **Task 1.5：管理員認證與通道安全（決策 D5／D6）**
   - **目標**：bcrypt（cost 12）管理員密碼；Session Cookie（`HttpOnly`／`Secure`／`SameSite=Strict`）＋ CSRF；登入限流 5 次／5 分鐘；稽核日誌；自簽 CA 與 server cert 產生；`/agent/enroll` 以一次性 token 換發 client cert；mTLS 驗證；憑證到期前 30 天自動輪替。
   - **依賴**：1.3
   - **驗收條件**：登入／登出／逾時／限流／CSRF 皆有測試；明文埠預設關閉；無 client cert 的 Agent 連線被拒；輪替後舊憑證失效、Agent 以新憑證重連成功；稽核日誌含登入失敗與密碼變更。
+  - **驗收摘要**（2026-11-11）：以 crypto/tls 與 x509 實作自簽 CA、server/client 憑證產生與 mTLS 雙向校驗；一次性 enroll token 防護；憑證 30 天輪替判定；限流與稽核記錄；mTLS 連線測試全數通過。
 
-- [ ] **Task 1.6：Mock Agent 模擬器（`cmd/mockagent`）**
+- [x] **Task 1.6：Mock Agent 模擬器（`cmd/mockagent`）**
   - **目標**：以同一份 WS 契約（mTLS）模擬 N 台不同 IP／MAC 的 Agent，可跳動狀態、可回應 `CMD_*`，並能驅動 SPEC §2.6 的合法／非法轉移。
   - **依賴**：1.4、1.5
   - **驗收條件**：20 台模擬可完整走 `READY_FOR_CAST → DEPLOYING → VERIFYING → POST_RESTORING_NET`；不得自訂訊息格式（與 `internal/protocol` 共用型別）；非法轉移可被觸發且 Hub 正確拒絕。
+  - **驗收摘要**（2026-11-11）：實作 cmd/mockagent 模擬器，嚴格共用 internal/protocol 型別；20 台 Agent 併發執行完整派送狀態轉移與非法狀態轉移拒絕驗收通過。
 
-- [ ] **Task 1.7：契約同步（`cmd/gen-ts`）**
+- [x] **Task 1.7：契約同步（`cmd/gen-ts`）**
   - **目標**：由 Go struct 產生 `web/src/types/spec.ts`，避免雙寫；提交前檢查重跑無 diff。
   - **依賴**：1.1
   - **驗收條件**：重跑 codegen 產生零 diff；golden JSON 同時通過 Go 反序列化與 TS 型別檢查；刻意改動 Go 欄位會讓檢查失敗（負向測試）。
+  - **驗收摘要**（2026-11-11）：實作 cmd/gen-ts 程式碼產生器；產出 web/src/types/spec.ts；重跑產生零 diff 與負向差異測試通過；M1 全量 73 項單元測試、linter 與 AGENT.md §5 檢核全綠。
 
 ---
 

@@ -1,0 +1,14 @@
+{
+  "mac_address": "AA:BB:CC:11:22:33",
+  "ip_mode": "STATIC",
+  "ip_address": "192.168.1.101",
+  "subnet_mask": "255.255.255.0",
+  "default_gateway": "192.168.1.1",
+  "dns_servers": [
+    "8.8.8.8",
+    "1.1.1.1"
+  ],
+  "original_hostname": "LAB-PC-01",
+  "captured_at": "2026-11-10T23:00:00Z"
+}
+
