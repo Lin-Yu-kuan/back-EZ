@@ -1,7 +1,7 @@
 # AI 開發守則與架構約束 (`AGENT.md`)
 
 > [!IMPORTANT]
-> 本文件為 AI Agent 在進行本專案開發時的最高行為準則。每次撰寫或修改程式碼前，必須對照 [`SPEC.md`](file:///C:/Users/cree5/.gemini/antigravity/brain/33a0b0ec-4aab-4ca2-9f2b-b821da635c20/SPEC.md) 與 [`TASKS.md`](file:///C:/Users/cree5/.gemini/antigravity/brain/33a0b0ec-4aab-4ca2-9f2b-b821da635c20/TASKS.md)，嚴禁偏離契約或自行發明未定義的欄位。
+> 本文件為 AI Agent 在進行本專案開發時的最高行為準則。每次撰寫或修改程式碼前，必須對照 [`SPEC.md`](./SPEC.md) 與 [`TASKS.md`](./TASKS.md)，嚴禁偏離契約或自行發明未定義的欄位。
 
 ---
 
@@ -29,7 +29,7 @@
 ## 3. 專案標準目錄結構
 
 ```text
-ez-restore/
+back-EZ/                        # 專案根目錄（Go module 路徑待決策）
 ├── SPEC.md                     # 系統技術規格白皮書
 ├── AGENT.md                    # AI 開發守則 (本文件)
 ├── TASKS.md                    # 任務分解與進度追蹤
@@ -43,10 +43,24 @@ ez-restore/
 │   └── workers/                # 獨立功能模組 (Workers)
 │       ├── wol/                # Wake-on-LAN 魔術封包發送器
 │       ├── vhdx/               # VHDX 差分硬碟與 BCD 開機管理封裝
+│       ├── pxe/                # PXE / TFTP / ProxyDHCP 引導（尚無對應 Task，見 SPEC §1.2 D2）
 │       ├── netpreserve/        # 派送前 IP/Hostname 快照與派送後離線/在線還原
 │       └── multicast/          # udp-sender / udp-receiver 進程控制與進度解析
 └── web/                        # React + Tailwind CSS 中控台前端與本機鎖定面板
 ```
+
+**Worker 命名對照（唯一合法名稱）**
+
+| 概念名稱（＝Go package） | 目錄 | 對應 Task |
+| :--- | :--- | :--- |
+| `wol` | `internal/workers/wol` | 3.1 |
+| `vhdx` | `internal/workers/vhdx` | 3.3 |
+| `pxe` | `internal/workers/pxe` | **（尚無，見 SPEC §1.2 D2）** |
+| `multicast` | `internal/workers/multicast` | 4.2 |
+| `netpreserve`（`capture` / `restore`） | `internal/workers/netpreserve` | 4.1、4.3 |
+
+- 舊稱 `wol_worker` / `vhdx_worker` / `pxe_worker` / `multicast_worker` / `net_preserve_worker` 一律廢止，不得再出現在程式碼、註解、文件或 JSON 欄位中。
+- 術語固定：**中控端**＝Go Hub 本體（含內嵌靜態資源）；**中控台**＝其 Web UI；**Agent**＝客戶端 Windows 服務；**母機／子機**＝派送中的 Sender／Receiver。禁止用「中控台」指稱後端。
 
 ---
 

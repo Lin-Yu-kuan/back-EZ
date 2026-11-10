@@ -1,23 +1,25 @@
 # 任務分解與進度追蹤清單 (`TASKS.md`)
 
 > [!NOTE]
-> 本清單將 [`SPEC.md`](file:///C:/Users/cree5/.gemini/antigravity/brain/33a0b0ec-4aab-4ca2-9f2b-b821da635c20/SPEC.md) 拆解為原子化、可逐步驗證的開發任務。透過 Vibe Coding 開發時，每次只需指定執行單一 Task（例如：「請依規格實作 Task 1.1」），完成並驗收後再推進下一項。
+> 本清單將 [`SPEC.md`](./SPEC.md) 拆解為原子化、可逐步驗證的開發任務。透過 Vibe Coding 開發時，每次只需指定執行單一 Task（例如：「請依規格實作 Task 1.1」），完成並驗收後再推進下一項。
+>
+> **Milestone 編號以本文件為唯一權威**（[`SPEC.md`](./SPEC.md) §6 不再另立編號）。若 Task 涉及尚未決策項目（[`SPEC.md`](./SPEC.md) §1.2 的 D1–D8），**先停下確認決策，不得自行假設**。
 
 ---
 
 ## Milestone 1：基礎建設與共享契約 (Foundation & Contracts)
 
 - [ ] **Task 1.1：初始化專案骨架與共享資料模型 (`internal/protocol`)**
-  - **目標**：建立 Go Module 與目錄結構，並將 `SPEC.md` 第 2 節的所有 JSON Schema（`NetworkIdentity`, `RestorePoint`, `ClientNode`, `IPGroup`, `WSMessage`）轉化為 Go Struct 與單元測試。
-  - **驗收條件**：`go test ./internal/protocol/...` 通過，JSON 序列化/反序列化與 `SPEC.md` 欄位 100% 吻合。
+  - **目標**：建立 Go Module 與目錄結構，並將 `SPEC.md` §2.1–§2.5 的所有 JSON Schema（`NetworkIdentity`, `RestorePoint`, `ClientNode`, `IPGroup`, `DeployTask`, `WSMessage`）轉化為 Go Struct 與單元測試；§2.6 的狀態轉移表需以型別＋驗證函式表達。
+  - **驗收條件**：`go test ./internal/protocol/...` 通過；每個 Struct 的 JSON 序列化／反序列化與 `SPEC.md` 欄位（含必填、列舉值、`null` 語意）100% 吻合；非法狀態轉移必須被拒絕且有對應測試。
 
 - [ ] **Task 1.2：實作 SQLite 儲存層 (`internal/hub/store`)**
   - **目標**：使用純 Go SQLite 驅動建立資料表，支援儲存與查詢：IP 群組（`IPGroup`）、客戶端節點狀態、管理員密碼 Hash、以及派送前的 `NetworkIdentity` 備份表。
-  - **驗收條件**：支援以 IP 清單建立群組（即使電腦名稱相同也不衝突），並通過 CRUD 單元測試。
+  - **驗收條件**：支援以 IP 清單建立群組（即使電腦名稱相同也不衝突），並通過 CRUD 單元測試；`ip_list` 具全域唯一約束（同一 IP 僅屬一個群組，衝突回 `IP_IN_OTHER_GROUP`）；`client_id` 為安裝時產生之穩定鍵，**不得**由 IP 推導。
 
 - [ ] **Task 1.3：建立中控端 HTTP API 與 WebSocket Hub (`internal/hub/server`)**
-  - **目標**：實作 `SPEC.md` 第 5 節定義的 REST API 與 `/ws` WebSocket 廣播中心，並內建 Mock 模擬器（可模擬 20 台不同 IP 客戶端連線與狀態跳動）。
-  - **驗收條件**：啟動 Hub 後，可透過瀏覽器或測試腳本呼叫 API 並接收即時 WebSocket 狀態推播。
+  - **目標**：實作 `SPEC.md` 第 5 節定義的 REST API，以及兩個 WebSocket 通道：`/ws`（中控台推播，§5.2）與 `/ws/agent`（Agent 指令，§5.3），並內建 Mock 模擬器（可模擬 20 台不同 IP 客戶端連線與狀態跳動）。
+  - **驗收條件**：啟動 Hub 後，可呼叫 `SPEC.md` §5.1 全部端點並取得符合「共通規範」的回應（`ok`/`data`/`error.code`）；WS 推播符合 §2.5 封套（含 `v`/`seq`）並涵蓋 §5.2 全部事件；內建 Mock 模擬器必須走同一份契約（不得自訂格式），且能驅動 §2.6 的合法狀態轉移。
 
 ---
 
@@ -27,7 +29,7 @@
   - **目標**：建立與 `SPEC.md` 完全一致的 `src/types/spec.ts` 型別定義，以及 WebSocket 自動重連 Hook。
   - **驗收條件**：`npm run build` 無任何 TypeScript 型別錯誤。
 
-- [ ] **Task 2.2：實作中控台「IP 群組管理与電腦狀態網格」介面**
+- [ ] **Task 2.2：實作中控台（Hub Web UI）「IP 群組管理與電腦狀態網格」介面**
   - **目標**：
     1. 支援以 IP 範圍或 IP 清單新增/編輯群組（如「第 1 排」、「DHCP 組」）。
     2. 以卡片網格即時展示每台電腦的 IP、原本名稱、在線狀態、當前還原點與派送進度條。
@@ -35,6 +37,7 @@
 
 - [ ] **Task 2.3：實作「客戶端本機還原點管理面板（含強制密碼鎖）」**
   - **目標**：設計客戶端本機介面，預設為唯讀鎖定狀態；點擊「切換還原點」、「新增還原點」或「刪除還原點」時，強制彈出管理員密碼輸入框，驗證通過才放行。
+  - **前置**：需先完成 `SPEC.md` §1.2 **D1**（Service／GUI 分離與本機 IPC 契約）決策；不得先自行發明 IPC 協定。
   - **驗收條件**：未輸入正確密碼時，所有變更操作均被攔截並提示權限不足。
 
 ---
@@ -43,18 +46,21 @@
 
 - [ ] **Task 3.1：實作區域網路喚醒模組 (`internal/workers/wol`)**
   - **目標**：輸入一組目標 MAC（由指定 IP 群組查表取得），向區域網路廣播端口發送標準 102-byte UDP Magic Packet。
+  - **前置**：需先完成 `SPEC.md` §1.2 **D7**（離線 MAC 來源）決策；否則對「從未上線」的機器查不到 MAC，WOL 實務上無效。
   - **驗收條件**：單元測試驗證封包 Byte 結構正確（6 個 `0xFF` + 16 次重複 MAC），並支援批量群組喚醒。
 
 - [ ] **Task 3.2：實作管理員密碼驗證與雙向心跳 (`internal/agent/auth`)**
-  - **目標**：實作客戶端 Agent 連向中控端的註冊與心跳機制，以及 Bcrypt 密碼驗證與中控端遠端改密同步。
-  - **驗收條件**：中控端修改密碼後，客戶端本機即刻套用新密碼驗證。
+  - **目標**：實作客戶端 Agent 連向中控端的註冊與心跳機制（依 `SPEC.md` §5.3 的 `AGENT_HELLO` / `AGENT_STATUS` / `CMD_*` 契約），以及 Bcrypt 密碼驗證與中控端遠端改密同步。
+  - **前置**：需先完成 `SPEC.md` §1.2 **D5**（傳輸安全與 Agent 身分驗證）決策。
+  - **驗收條件**：中控端修改密碼後，**在線**客戶端即刻套用新密碼驗證；離線客戶端於下次上線時自動同步（兩種情境皆須有測試）。
 
 - [ ] **Task 3.3：實作 VHDX 差分還原點引擎 (`internal/workers/vhdx`)**
   - **目標**：封裝 `diskpart` 與 `bcdedit` 指令產生器，實作：
-    1. 新增還原點（建立新差分層，檢查深度上限 $\le 5$）。
-    2. 切換還原點（秒級重建乾淨讀寫層並更新開機指標）。
-    3. 刪除還原點。
+    1. 新增還原點（建立新差分層，`depth = parent.depth + 1`，超過 `SPEC.md` §2.2 上限 `5` 必須拒絕並回 `RESTORE_POINT_LIMIT`，不得自動合併）。
+    2. 切換還原點（秒級重建乾淨讀寫層並更新開機指標；「秒級」不含重開機時間）。
+    3. 刪除還原點（`is_active` 不得刪；含子節點之策略依 `SPEC.md` §2.2 拒絕或待決策）。
     4. **支援 `DryRun` 安全沙盒模式**（在家庭版開發筆電上模擬執行並輸出腳本日誌，不破壞真實開機區）。
+  - **前置**：需先完成 `SPEC.md` §1.2 **D4**（目標機 OS 版本與 VHDX 原生開機可行性）與 **D8**（兩套還原機制關係）決策。
   - **驗收條件**：在客戶端本機（輸入密碼後）與中控端皆能觸發新增、切換與刪除還原點，並通過單元測試。
 
 ---
@@ -69,7 +75,8 @@
   - **目標**：
     1. 中控端指定母機 IP（Sender）與目標子機 IP 清單（Receivers）。
     2. 封裝 `udp-sender` 與 `udp-receiver` 進程控制，解析標準輸出（Stdout）中的傳輸速率（MB/s）與完成百分比（%），即時透過 WebSocket 推播至中控台。
-  - **驗收條件**：透過 `DryRun` 流模擬器驗證母機與多台子機從 `READY_FOR_CAST` 到 `DEPLOYING` 100% 的完整狀態流轉。
+  - **前置**：需先完成 `SPEC.md` §1.2 **D3**（映像格式與 pipeline）決策。
+  - **驗收條件**：透過 `DryRun` 流模擬器驗證母機與多台子機從 `READY_FOR_CAST` 到 `DEPLOYING` 100% 的完整狀態流轉；並須測到「任一子機 `NetworkIdentity` 未收妥 → 任務停在 `PREPARING`、不得進入 `CASTING`」的阻擋行為（`SPEC.md` §2.4 紅線）。
 
 - [ ] **Task 4.3：實作派送後 IP 與電腦名稱自動復原器 (`internal/workers/netpreserve/restore`)**
   - **目標**：當子機接收完母機映像檔後，根據派送前保存的 `NetworkIdentity` 自動產生並執行復原動作：
