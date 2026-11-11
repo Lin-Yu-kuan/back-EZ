@@ -635,6 +635,51 @@ func (s *Service) RetryDeploy(taskID string) error {
 	return s.store.UpdateTask(*task)
 }
 
+func (s *Service) CompleteDeploy(taskID string) error {
+	task, err := s.store.GetTask(taskID)
+	if err != nil {
+		return errors.New(protocol.ErrNotFound)
+	}
+
+	dateStr := time.Now().UTC().Format("20060102")
+	dateDisplay := time.Now().UTC().Format("2006-01-02")
+	basePointID := "rp_base_" + dateStr
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	newBase := protocol.RestorePoint{
+		PointID:     basePointID,
+		Name:        "派送基準點 " + dateDisplay,
+		Description: "母機派送完成後系統自動建立的基準點",
+		VHDXFile:    "base.vhdx",
+		ParentID:    nil,
+		Depth:       0,
+		SizeBytes:   task.ImageBytes,
+		IsBase:      true,
+		IsActive:    true,
+		State:       protocol.RestorePointStateReady,
+		CreatedBy:   protocol.CreatedBySystem,
+		CreatedAt:   now,
+	}
+
+	for _, tip := range task.TargetIPs {
+		client, err := s.store.GetClientByIP(tip)
+		if err != nil {
+			continue
+		}
+		// Reset restore points (Decision D8)
+		if err := s.store.SaveRestorePoints(client.ClientID, []protocol.RestorePoint{newBase}); err != nil {
+			return err
+		}
+		client.ActivePointID = &newBase.PointID
+		client.RestorePointIDs = []string{newBase.PointID}
+		_ = s.store.UpsertClient(*client)
+	}
+
+	task.State = protocol.TaskStateSucceeded
+	task.FinishedAt = &now
+	return s.store.UpdateTask(*task)
+}
+
 func (s *Service) GetTask(taskID string) (*protocol.DeployTask, error) {
 	task, err := s.store.GetTask(taskID)
 	if err != nil {

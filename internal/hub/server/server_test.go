@@ -417,3 +417,73 @@ func TestServer_AgentEndpoints(t *testing.T) {
 		t.Errorf("missing certificate in enroll response")
 	}
 }
+
+func TestServer_CompleteDeployAndRestorePointReset(t *testing.T) {
+	srv, st, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	svc := srv.service
+
+	// 1. Setup target client with old restore points
+	targetIP := "192.168.1.55"
+	targetNode := protocol.ClientNode{
+		ClientID:  "cli_target_reset_55",
+		CurrentIP: targetIP,
+		Status:    protocol.ClientStatusOnlineWindows,
+		PEReady:   true,
+	}
+	_ = st.UpsertClient(targetNode)
+
+	oldPoints := []protocol.RestorePoint{
+		{PointID: "rp_old_base", Depth: 0, IsBase: true, IsActive: false, State: protocol.RestorePointStateReady},
+		{PointID: "rp_old_diff_1", Depth: 1, IsBase: false, IsActive: true, State: protocol.RestorePointStateReady},
+	}
+	_ = st.SaveRestorePoints(targetNode.ClientID, oldPoints)
+
+	// Setup master
+	masterIP := "192.168.1.10"
+	masterNode := protocol.ClientNode{
+		ClientID:  "cli_master_10",
+		CurrentIP: masterIP,
+		Status:    protocol.ClientStatusOnlineWindows,
+		PEReady:   true,
+	}
+	_ = st.UpsertClient(masterNode)
+
+	// 2. Create DeployTask
+	task, err := svc.StartDeploy(masterIP, []string{targetIP})
+	if err != nil {
+		t.Fatalf("CreateDeploy failed: %v", err)
+	}
+	if !task.ResetsRestorePoints {
+		t.Fatalf("expected ResetsRestorePoints to be true (Decision D8)")
+	}
+
+	// 3. CompleteDeploy
+	if err := svc.CompleteDeploy(task.TaskID); err != nil {
+		t.Fatalf("CompleteDeploy failed: %v", err)
+	}
+
+	// 4. Verify target client has only 1 fresh base restore point
+	updatedTarget, err := st.GetClientByIP(targetIP)
+	if err != nil {
+		t.Fatalf("GetClientByIP failed: %v", err)
+	}
+
+	points, err := st.ListRestorePoints(updatedTarget.ClientID)
+	if err != nil {
+		t.Fatalf("ListRestorePoints failed: %v", err)
+	}
+	if len(points) != 1 {
+		t.Fatalf("expected exactly 1 restore point after deploy, got %d: %+v", len(points), points)
+	}
+	if !points[0].IsBase || !points[0].IsActive || points[0].Depth != 0 {
+		t.Fatalf("invalid new base point: %+v", points[0])
+	}
+	if points[0].CreatedBy != protocol.CreatedBySystem {
+		t.Fatalf("expected CreatedBy SYSTEM, got %s", points[0].CreatedBy)
+	}
+	if updatedTarget.ActivePointID == nil || *updatedTarget.ActivePointID != points[0].PointID {
+		t.Fatalf("client active_point_id not updated to new base point")
+	}
+}

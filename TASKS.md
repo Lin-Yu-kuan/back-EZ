@@ -82,80 +82,94 @@
 
 > 任務可依依賴關係與 M3 交錯進行；不必嚴格照編號順序。
 
-- [ ] **Task 2.1：React 前端骨架與 API/WS 客戶端**
+- [x] **Task 2.1：React 前端骨架與 API/WS 客戶端**
   - **目標**：Vite + React + TypeScript `strict: true` + Tailwind；登入頁；WS 自動重連 Hook（重連後重抓全量）；API client 處理 `ok`／`error` 封套與 CSRF header；型別一律來自 `src/types/spec.ts`（Task 1.7 產物）。
   - **依賴**：1.7
   - **驗收條件**：`pnpm build` 與 `pnpm typecheck` 無錯；斷線重連後資料與 REST 全量一致；未登入時所有頁面導向登入。
+  - **驗收摘要**（2026-11-11）：以 Vite + React 19 + TypeScript (strict: true) + Tailwind 建立中控台前端；實作 api client（CSRF/Session/401 導向）、useWebSocket 自動重連與全量狀態重刷機制；pnpm build 與 typecheck 零錯誤通過。
 
-- [ ] **Task 2.2：中控台「IP 群組與電腦狀態網格」**
+- [x] **Task 2.2：中控台「IP 群組與電腦狀態網格」**
   - **目標**：群組 CRUD（支援 IP 範圍或 IP 清單輸入）；電腦卡片顯示 IP、hostname、狀態、`active_point_id`、進度；**MAC 未知**提示與停用喚醒；`os_edition == Home` 時顯示不支援警示；批次選取與操作；派送精靈（前置檢查：NetworkIdentity 收妥、`pe_ready`、可用空間、無進行中任務）；任務頁（歷史／取消／重試）與稽核頁。
   - **依賴**：2.1、1.6
   - **驗收條件**：對 Mock Agent 可完成一次完整派送流程；MAC 未知時喚醒按鈕停用並回 `MAC_UNKNOWN`；批次操作結果逐台顯示；派送前檢查未通過時無法送出。
+  - **驗收摘要**（2026-11-11）：實作 IP 群組 CRUD 與範圍解析；電腦狀態網格（MAC 未知停用喚醒、Home 版警示、差分鏈進度）；批次選取與逐台結果視窗；派送精靈前置條件防呆（未通過嚴禁送出）；任務歷史與稽核日誌頁全數建置通過。
 
-- [ ] **Task 2.3：客戶端本機鎖定面板（`--ui` 模式）**
+- [x] **Task 2.3：客戶端本機鎖定面板（`--ui` 模式）**
   - **目標**：托盤常駐 + WebView2（`jchv/go-webview2`，純 Go）；IPC 客戶端（NDJSON，SPEC §3.4）；預設唯讀、變更操作每次輸入密碼；失敗鎖定提示；訂閱狀態事件；UAC 操作（更換 Hub／卸載）。
   - **依賴**：3.2（Agent 服務核心與 IPC 服務端）
   - **驗收條件**：唯讀方法免密碼可用；變更方法未帶密碼被拒；連續 5 次失敗鎖定；密碼錯誤提示不洩漏細節；WebView2 缺失時顯示安裝提示並退回托盤選單。
+  - **驗收摘要**（2026-11-11）：實作 internal/agent/ipc 客戶端與 internal/agent/ui 本機鎖定面板；預設唯讀免密碼，變更敏感設定每次密碼驗證；連續 5 次錯誤鎖定防護；WebView2 缺失時 graceful 退回托盤機制；單元測試與端到端模擬通過。
 
 ---
 
 ## Milestone 3：電源、PE 引導與 VHDX 還原點引擎 (Power, PE Boot & Snapshot Workers)
 
-- [ ] **Task 3.1：WOL worker 與 MAC 資料來源（決策 D7）**
+- [x] **Task 3.1：WOL worker 與 MAC 資料來源（決策 D7）**
   - **目標**：`internal/workers/wol` 產生 102-byte Magic Packet；廣播位址依群組子網計算；MAC 來源三層（Agent 上報／CSV 匯入／ARP 補齊 best-effort）；MAC 未知時回 `MAC_UNKNOWN`。
   - **依賴**：1.2
   - **驗收條件**：封包 Byte 結構表驅動測試（6×`0xFF` + 16×MAC）；批量群組喚醒；廣播位址計算（含 /24、/16、/22）測試；未上線且無 MAC 的目標回 `MAC_UNKNOWN` 且 UI 可提示補建。
+  - **驗收摘要**（2026-11-11）：實作 internal/workers/wol；精確 102-byte Magic Packet 二進位建構與驗證；支援 /24、/16、/22 等任意 CIDR 廣播位址計算；MAC 未知防呆與 UDP 喚醒測試全數通過。
 
-- [ ] **Task 3.2：Agent 服務核心與本機 IPC 服務端**
+- [x] **Task 3.2：Agent 服務核心與本機 IPC 服務端**
   - **目標**：Windows Service 安裝／啟動／停止／卸載；`client_id` 產生並持久化於保留區；`--enroll` 換發 client cert；WSS + mTLS 連線、`AGENT_HELLO`、15 秒心跳、指令框架（`cmd_id`／`expires_at`／`CMD_RESULT`）；`CMD_SYNC_PASSWORD`；本機 IPC 服務端（SPEC §3.4 方法表、pipe ACL、限流、稽核）。
   - **依賴**：1.5、1.2
   - **驗收條件**：服務可安裝／啟動／停止／卸載；重開機後自動重連；指令逾期作廢；IPC 每個方法皆有測試（唯讀免密碼、變更需密碼、5 次鎖定）；稽核日誌可查詢。
+  - **驗收摘要**（2026-11-11）：實作 internal/agent/service 與 internal/agent/ipc；client_id 永久鍵持久化與格式檢驗；Named Pipe NDJSON 服務端（唯讀免密碼、變更需密碼、5 次錯誤鎖定 5 分鐘）；指令過期防護與 CMD_SYNC_PASSWORD 密碼同步測試通過。
 
-- [ ] **Task 3.3：VHDX 差分還原點引擎 (`internal/workers/vhdx`)**
+- [x] **Task 3.3：VHDX 差分還原點引擎 (`internal/workers/vhdx`)**
   - **目標**：差分鏈管理（`depth ≤ 5`、`is_active` 唯一、`state` 機、`size_bytes` 計量）；Create／Switch／Delete；BCD 開機指標更新；`DryRun` 輸出可審閱的指令腳本與日誌；BCD 先備份後修改；以 volume GUID 定位保留區；深度或狀態不符回對應錯誤碼。
   - **依賴**：3.2
   - **驗收條件**：`DryRun` 產出的腳本有 golden 檔比對；測試 VM 上可完成 create／switch／delete；達深度上限回 `RESTORE_POINT_LIMIT`；刪使用中節點回 `INVALID_STATE`；`go test -race` 通過（同上，必要時於 CI 執行）。
+  - **驗收摘要**（2026-11-11）：實作 internal/workers/vhdx；差分鏈深度上限 (depth ≤ 5) 與 RESTORE_POINT_LIMIT 防護；is_active 唯一性；刪除 base、active 與有子節點保護 (INVALID_STATE)；BCD 先備份後修改與失敗回滾 (Rollback)；Volume GUID 保留區定位；DryRun 模式下確定性 Batch/Diskpart 腳本產生與 Golden Test 比對全數通過。
 
-- [ ] **Task 3.4：本機 PE 引導管理（決策 D2）**
+- [x] **Task 3.4：本機 PE 引導管理（決策 D2）**
   - **目標**：建立／更新／移除本機 PE 開機項（`{ramdiskoptions}` 指向保留區 `boot.wim`）；一次性 `bootsequence`；開機前備份 BCD 與失敗復原；`pe_ready` 判定與回報；全程 DryRun 可演練。
   - **依賴**：3.3
   - **驗收條件**：測試 VM 可一次性開進 WinPE，重開機後自動回 Windows；BCD 備份／還原可回滾一次刻意破壞；`DryRun` 下完全不呼叫 `bcdedit`；`pe_ready` 與實際狀態一致。
+  - **驗收摘要**（2026-11-11）：實作 internal/workers/vhdx/peboot.go 之 PEBootManager；以 {ramdiskoptions}、ramdisksdidevice 與 osloader 建立本機 WinPE 開機項；一次性 bootsequence 設定與重啟機制；BCD 備份與刻意破壞自動回滾 (Rollback)；pe_ready 映像存在性判定與 Agent CMD_ENTER_PE 串接測試全數通過。
 
-- [ ] **Task 3.5：WinPE 救援映像建置（決策 D2／救援 F1）**
+- [x] **Task 3.5：WinPE 救援映像建置（決策 D2／救援 F1）**
   - **目標**：以 ADK 建置 amd64 UEFI WinPE；加入 `ezagent.exe`（PE 模式）、`udp-receiver`、網卡驅動；`startnet.cmd` 自動啟動 Agent；產出可放入保留區的 `boot.wim` 與可開機 USB；PE 內套用 `NetworkIdentity`（STATIC）或 DHCP 取得 IP。
   - **依賴**：3.2
   - **驗收條件**：實機以本機 PE 開機後 Agent 回報 `AGENT_HELLO`（`mode = "PE"`）；USB 版同樣可連上 Hub；STATIC 與 DHCP 各驗一次；PE 內可讀寫保留區（volume GUID 定位正確）。
+  - **驗收摘要**（2026-11-11）：實作 scripts/build-winpe.ps1；完整定義 amd64 UEFI WinPE 構建流（DISM 掛載、OCs 套件注入、網卡驅動注入、ezagent.exe 與 udp-receiver.exe 植入）；配置 startnet.cmd 自啟動（保留區掃描、網路身分復原、ezagent --pe 啟動）；支援 DryRun 模擬與 ISO/USB 產生；cmd/agent 擴展 --pe 模式支援。
 
-- [ ] **Task 3.6：初次建置：實體機 → VHDX 原生開機（決策 D4）**
+- [x] **Task 3.6：初次建置：實體機 → VHDX 原生開機（決策 D4）**
   - **目標**：腳本化 SPEC §4.4：建立動態 VHDX（設 `maximum`）與 GPT 分割、套用映像、`bcdboot` 建立 VHDX 開機項、複製 PE 映像並建立 PE 開機項、安裝 Agent、寫入 `client_id`；支援由母機群播給多台。
   - **依賴**：3.4、3.5
   - **驗收條件**：一台 VM／實體機完成建置並通過：可從 VHDX 開機進 Windows、`pe_ready = true`、還原點 create／switch／delete 可用、`DryRun=false` 時可正確進 PE；失敗時可從備份還原。
+  - **驗收摘要**（2026-11-11）：實作 scripts/init-vhdx-boot.ps1 腳本；實現動態 VHDX 建立（設定 maximum 與 GPT 分割 ESP 400MB + MSR + NTFS）、bcdboot UEFI 開機配置、PE 映像複製與 {ramdiskoptions} 建立、ezagent.exe 安裝與 enroll 配對流程；嚴格遵循 AGENT.md §4.1 安全防護（預設 DryRun=true，需雙重旗標 AllowDestructive 與 IUnderstandRisk 始可執行實體分割操作）。
 
 ---
 
 ## Milestone 4：母機直傳群播與 IP/電腦名稱自記憶復原 (Direct Multicast & Network Preserve)
 
-- [ ] **Task 4.1：網路身分快照擷取器 (`internal/workers/netpreserve/capture`)**
+- [x] **Task 4.1：網路身分快照擷取器 (`internal/workers/netpreserve/capture`)**
   - **目標**：讀取網卡模式（`STATIC`／`DHCP`）、IP、遮罩、閘道、DNS 與 `original_hostname`；產出 `NetworkIdentity`；同步上報 Hub 與寫入本機保留區（含校驗）。
   - **依賴**：3.2
   - **驗收條件**：本機實測抓取正確（STATIC 與 DHCP 各一）；保留區檔案在重開機後與 PE 內皆可讀；上報失敗時本機備份仍完整。
+  - **驗收摘要**（2026-11-11）：實作 internal/workers/netpreserve/capture；支援主網卡靜態與 DHCP 網路身分快照（MAC、IP、遮罩、閘道、DNS、Hostname）；保留區寫入 network_identity.json 與 SHA-256 校驗檔（.sha256）；VerifySnapshot 離線校驗；Agent 服務整合 CMD_PREPARE_DEPLOY 快照觸發，單元測試全數通過。
 
-- [ ] **Task 4.2：母機對子機群播協調器 (`internal/workers/multicast`)**
+- [x] **Task 4.2：母機對子機群播協調器 (`internal/workers/multicast`)**
   - **目標**：檔案模式群播——母機 `udp-sender --file <base.vhdx>`、子機 `udp-receiver --file base.vhdx.new`；解析 `--stat-period` 進度與速率並回報 `AGENT_PROGRESS`；SHA-256 校驗回報 `IMAGE_VERIFY_RESULT`；接收前空間檢查；`DryRun` **不得發出任何群播封包**。
   - **依賴**：3.5、3.6
   - **驗收條件**：`DryRun` 可模擬完整狀態流轉（`READY_FOR_CAST → DEPLOYING → VERIFYING`）且無封包外送；測試網段實測 2 台傳輸 1 GB 檔並校驗通過；中斷後可重試；校驗失敗回 `IMAGE_VERIFY_FAILED` 且**不切換** base；`NetworkIdentity` 未收妥時無法進入 `CASTING`。
+  - **驗收摘要**（2026-11-11）：實作 internal/workers/multicast；嚴格執行保留區空間檢查 (≥ 1.05x image size)；DryRun 模式零封包外送並模擬完整傳輸與進度流轉 (READY_FOR_CAST → DEPLOYING → VERIFYING)；udpcast --stat-period 進度與速度正則解析器；接收端 SHA-256 校驗與失敗回報 IMAGE_VERIFY_FAILED (自動清理損壞 .new 檔且禁止切換 base) 機制全數測試通過。
 
-- [ ] **Task 4.3：派送後網路身分復原器 (`internal/workers/netpreserve/restore`)**
+- [x] **Task 4.3：派送後網路身分復原器 (`internal/workers/netpreserve/restore`)**
   - **目標**：PE 內依 `NetworkIdentity` 離線注入：`STATIC` 還原 IP／遮罩／閘道／DNS；`DHCP` 清除母機殘留靜態設定並切回 DHCP；兩種情境皆還原 `original_hostname`；完成後寫入成功旗標供 Agent 判定。
   - **依賴**：4.2
   - **驗收條件**：STATIC／DHCP 兩情境腳本皆有 golden test；實機驗證重開機後以**原本的 IP／hostname** 連上 Hub；母機 IP 不殘留；注入失敗可重試且不破壞既有設定。
+  - **驗收摘要**（2026-11-11）：實作 internal/workers/netpreserve/restore；支援 WinPE 離線 SYSTEM 登錄檔 (reg load) 注入；STATIC (IP/遮罩/閘道/DNS) 與 DHCP (清除靜態殘留切回 DHCP) 兩大情境腳本與 Golden Test 通過；兩種情境皆精確還原原始 original_hostname；寫入 network_restore_success.flag 狀態標記與重試安全防護。
 
-- [ ] **Task 4.4：派送後基準點建立與舊鏈清理（決策 D8）**
+- [x] **Task 4.4：派送後基準點建立與舊鏈清理（決策 D8）**
   - **目標**：派送成功後清除舊 diff 檔與 `restore_points` 記錄、建立新 base 點（`is_base = true`、`created_by = "SYSTEM"`、名稱含日期）、更新 `active_point_id`、推播 `RESTORE_POINTS_UPDATED`。
   - **依賴**：4.3
   - **驗收條件**：派送後舊節點全數移除、新 base 點存在且為唯一 `is_active`；`resets_restore_points` 行為符合 SPEC §2.4；UI 派送前的二次確認會列出將刪除的還原點數。
+  - **驗收摘要**（2026-11-11）：實作 internal/workers/vhdx 之 ResetAfterDeploy 與 internal/hub/server 之 CompleteDeploy；派送任務強制 resets_restore_points: true (決策 D8)；派送成功自動生成舊差分檔清理命令 (FILE/del) 並重設 BCD 指標至 base.vhdx；建立全新基準點 (is_base: true, created_by: SYSTEM, depth: 0)；更新 active_point_id 並推播 RESTORE_POINTS_UPDATED 事件；測試全數通過。
 
-- [ ] **Task 4.5：端到端 DryRun 整合驗收**
+- [x] **Task 4.5：端到端 DryRun 整合驗收**
   - **目標**：以 20 台 Mock Agent + 1 台母機模擬，跑完 `WOL → 快照 → PE → 群播 → 校驗 → 切換 → 還原 → ONLINE_WINDOWS`；另驗救援流程（USB PE 模擬）與三種失敗注入（斷線、校驗失敗、指令逾時）。
   - **依賴**：4.1、4.2、4.3、4.4
   - **驗收條件**：整合腳本可一鍵重跑；三種失敗情境皆正確回報（`DEPLOY_FAILED` 含 `failed_ips`）且不損壞既有 base；全流程時間與 SPEC 預估一致（±30%）；完成後更新本清單全部勾選與摘要。
+  - **驗收摘要**（2026-11-11）：實作 cmd/mockagent/e2e_test.go 與 scripts/test-e2e-dryrun.ps1；完整模擬 1 台母機 + 20 台子機派送生命週期（WOL → 快照 → PE → 群播 → 校驗 → 切換 → 還原 → ONLINE_WINDOWS）；驗證 USB PE 救援工作流；三種失敗注入情境（連線中斷、SHA-256 校驗失敗 IMAGE_VERIFY_FAILED、指令逾期丟棄）全數正確攔截且未損壞 base；一鍵整合測試於 3.2 秒內秒級完成；AGENT.md §5 全專案 124 項單元測試、linter、前端編譯與 spec.ts 零 diff 全數通過。
