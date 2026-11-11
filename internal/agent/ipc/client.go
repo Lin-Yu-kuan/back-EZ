@@ -136,6 +136,14 @@ func (c *Client) DeleteRestorePoint(password, pointID string) error {
 	return err
 }
 
+func (c *Client) OverwriteRestorePoint(password, pointID string) error {
+	_, err := c.call("OverwriteRestorePoint", map[string]any{
+		"password": password,
+		"point_id": pointID,
+	})
+	return err
+}
+
 func (c *Client) SetAutoRestore(password string, enabled bool) error {
 	_, err := c.call("SetAutoRestore", map[string]any{
 		"password": password,

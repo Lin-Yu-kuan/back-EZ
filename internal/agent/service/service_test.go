@@ -324,3 +324,43 @@ func TestAgentCore_CmdPrepareDeploy(t *testing.T) {
 		t.Fatalf("expected network_identity.json to be created in reserveRoot, got err: %v", err)
 	}
 }
+
+func TestAgentCore_RestorePointsPersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := AgentConfig{
+		ClientID:    "cli_persist_test_1234",
+		ReserveRoot: tmpDir,
+	}
+	cfgPath := filepath.Join(tmpDir, "agent.json")
+
+	// 1. Initial agent core
+	core1, err := NewAgentCore(cfg, cfgPath, "secret")
+	if err != nil {
+		t.Fatalf("failed to create agent core: %v", err)
+	}
+
+	// 2. Create a new restore point
+	if err := core1.CreateRestorePoint("使用者重要備份", "軟體安裝後快照"); err != nil {
+		t.Fatalf("CreateRestorePoint failed: %v", err)
+	}
+
+	pts1, _ := core1.ListRestorePoints()
+	if len(pts1) != 2 {
+		t.Fatalf("expected 2 restore points, got %d", len(pts1))
+	}
+
+	// 3. Simulate process restart by creating a new AgentCore from the same reserve root
+	core2, err := NewAgentCore(cfg, cfgPath, "secret")
+	if err != nil {
+		t.Fatalf("failed to reload agent core: %v", err)
+	}
+
+	pts2, _ := core2.ListRestorePoints()
+	if len(pts2) != 2 {
+		t.Fatalf("expected 2 restore points after restart, got %d (points vanished!)", len(pts2))
+	}
+
+	if pts2[1].Name != "使用者重要備份" {
+		t.Errorf("expected restore point name '使用者重要備份', got %s", pts2[1].Name)
+	}
+}

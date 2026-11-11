@@ -37,6 +37,8 @@ type AgentCore struct {
 	ipcServer *ipc.Server
 	peBoot    *vhdx.PEBootManager
 	capturer  *capture.Capturer
+	engine    *vhdx.Engine
+	logger    *OperationLogger
 	status    protocol.ClientStatus
 	peReady   bool
 	activePID *string
@@ -79,13 +81,30 @@ func LoadOrCreateConfig(reserveRoot string) (*AgentConfig, string, error) {
 	return &cfg, configPath, nil
 }
 
+func (a *AgentCore) persistPointsLocked() {
+	if a.cfg.ReserveRoot == "" {
+		return
+	}
+	_ = os.MkdirAll(a.cfg.ReserveRoot, 0755)
+	chainPath := filepath.Join(a.cfg.ReserveRoot, "chain.json")
+	data, err := json.MarshalIndent(a.points, "", "  ")
+	if err == nil {
+		_ = os.WriteFile(chainPath, data, 0644)
+	}
+}
+
 func NewAgentCore(cfg AgentConfig, configPath string, initialPassword string) (*AgentCore, error) {
-	core := &AgentCore{
-		cfg:        cfg,
-		configPath: configPath,
-		status:     protocol.ClientStatusOnlineWindows,
-		peReady:    true,
-		points: []protocol.RestorePoint{
+	// Try loading existing restore points from chain.json on disk
+	chainPath := filepath.Join(cfg.ReserveRoot, "chain.json")
+	var initialPoints []protocol.RestorePoint
+	var basePID string
+
+	if data, err := os.ReadFile(chainPath); err == nil {
+		_ = json.Unmarshal(data, &initialPoints)
+	}
+
+	if len(initialPoints) == 0 {
+		initialPoints = []protocol.RestorePoint{
 			{
 				PointID:     "rp_base",
 				Name:        "Base System",
@@ -99,10 +118,33 @@ func NewAgentCore(cfg AgentConfig, configPath string, initialPassword string) (*
 				CreatedBy:   protocol.CreatedBySystem,
 				CreatedAt:   time.Now().UTC().Format(time.RFC3339),
 			},
-		},
+		}
+		basePID = "rp_base"
+	} else {
+		for _, p := range initialPoints {
+			if p.IsActive {
+				basePID = p.PointID
+				break
+			}
+		}
+		if basePID == "" && len(initialPoints) > 0 {
+			basePID = initialPoints[0].PointID
+		}
 	}
-	basePID := "rp_base"
-	core.activePID = &basePID
+
+	core := &AgentCore{
+		cfg:        cfg,
+		configPath: configPath,
+		status:     protocol.ClientStatusOnlineWindows,
+		peReady:    true,
+		points:     initialPoints,
+	}
+	if basePID != "" {
+		core.activePID = &basePID
+	}
+
+	// Persist initially so chain.json always exists on disk
+	core.persistPointsLocked()
 
 	peCfg := vhdx.PEBootConfig{
 		DryRun:           true,
@@ -119,6 +161,24 @@ func NewAgentCore(cfg AgentConfig, configPath string, initialPassword string) (*
 	core.ipcServer = srv
 
 	return core, nil
+}
+
+func (a *AgentCore) SetEngine(e *vhdx.Engine) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.engine = e
+}
+
+func (a *AgentCore) SetLogger(l *OperationLogger) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.logger = l
+}
+
+func (a *AgentCore) Logger() *OperationLogger {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.logger
 }
 
 func (a *AgentCore) IPCServer() *ipc.Server {
@@ -183,6 +243,9 @@ func (a *AgentCore) CreateRestorePoint(name, desc string) error {
 	defer a.mu.Unlock()
 
 	if len(a.points) >= 5 {
+		if a.logger != nil {
+			a.logger.Log("CREATE", name, "FAILED", "差分鏈深度已達上限 (最多 5 個)")
+		}
 		return errors.New(protocol.ErrRestorePointLimit)
 	}
 
@@ -202,11 +265,33 @@ func (a *AgentCore) CreateRestorePoint(name, desc string) error {
 		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
 	}
 
+	if a.engine != nil {
+		_, plan, err := a.engine.Create(vhdx.CreateRequest{
+			PointID:     pid,
+			Name:        name,
+			Description: desc,
+			ParentID:    a.activePID,
+			CreatedBy:   protocol.CreatedByAdminLocal,
+		})
+		if err != nil {
+			if a.logger != nil {
+				a.logger.Log("CREATE", name, "FAILED", fmt.Sprintf("底層建立失敗: %v", err))
+			}
+			return err
+		}
+		if a.logger != nil {
+			a.logger.Log("CREATE", name, "SUCCESS", fmt.Sprintf("成功建立差分硬碟與開機項 (共 %d 個步驟)", len(plan.Steps)))
+		}
+	} else if a.logger != nil {
+		a.logger.Log("CREATE", name, "SUCCESS", "成功建立還原點")
+	}
+
 	for i := range a.points {
 		a.points[i].IsActive = false
 	}
 	a.points = append(a.points, newRP)
 	a.activePID = &pid
+	a.persistPointsLocked()
 
 	a.ipcServer.BroadcastEvent("restore_points_updated", a.points)
 	return nil
@@ -217,19 +302,50 @@ func (a *AgentCore) SwitchRestorePoint(pointID string) error {
 	defer a.mu.Unlock()
 
 	found := false
+	var targetName string
+	for i := range a.points {
+		if a.points[i].PointID == pointID {
+			targetName = a.points[i].Name
+			found = true
+			break
+		}
+	}
+	if !found {
+		if a.logger != nil {
+			a.logger.Log("SWITCH", pointID, "FAILED", "找不到指定的還原點")
+		}
+		return errors.New(protocol.ErrNotFound)
+	}
+
+	if a.engine != nil {
+		plan, err := a.engine.Switch(pointID)
+		if err != nil {
+			if a.logger != nil {
+				a.logger.Log("SWITCH", fmt.Sprintf("%s (%s)", targetName, pointID), "FAILED", fmt.Sprintf("BCD 開機項切換失敗: %v", err))
+			}
+			return err
+		}
+		backupPath := ""
+		if plan != nil {
+			backupPath = plan.BackupBCDPath
+		}
+		if a.logger != nil {
+			a.logger.Log("SWITCH", fmt.Sprintf("%s (%s)", targetName, pointID), "SUCCESS", fmt.Sprintf("已成功更新 BCD 開機指標至目標磁碟 (BCD 備份於: %s)", backupPath))
+		}
+	} else if a.logger != nil {
+		a.logger.Log("SWITCH", fmt.Sprintf("%s (%s)", targetName, pointID), "SUCCESS", "已切換開機指標")
+	}
+
 	for i := range a.points {
 		if a.points[i].PointID == pointID {
 			a.points[i].IsActive = true
-			found = true
 		} else {
 			a.points[i].IsActive = false
 		}
 	}
-	if !found {
-		return errors.New(protocol.ErrNotFound)
-	}
-
 	a.activePID = &pointID
+	a.persistPointsLocked()
+
 	a.ipcServer.BroadcastEvent("restore_points_updated", a.points)
 	return nil
 }
@@ -239,26 +355,88 @@ func (a *AgentCore) DeleteRestorePoint(pointID string) error {
 	defer a.mu.Unlock()
 
 	if a.activePID != nil && *a.activePID == pointID {
+		if a.logger != nil {
+			a.logger.Log("DELETE", pointID, "FAILED", "無法刪除目前使用中的還原點")
+		}
 		return errors.New(protocol.ErrInvalidState)
+	}
+
+	if a.engine != nil {
+		_, err := a.engine.Delete(pointID)
+		if err != nil {
+			if a.logger != nil {
+				a.logger.Log("DELETE", pointID, "FAILED", fmt.Sprintf("底層刪除失敗: %v", err))
+			}
+			return err
+		}
 	}
 
 	var updated []protocol.RestorePoint
 	found := false
+	var targetName string
 	for _, p := range a.points {
 		if p.PointID == pointID {
 			if p.IsBase {
+				if a.logger != nil {
+					a.logger.Log("DELETE", pointID, "FAILED", "禁止刪除 Base 基準節點")
+				}
 				return errors.New(protocol.ErrInvalidState)
 			}
+			targetName = p.Name
 			found = true
 			continue
 		}
 		updated = append(updated, p)
 	}
 	if !found {
+		if a.logger != nil {
+			a.logger.Log("DELETE", pointID, "FAILED", "找不到指定的還原點")
+		}
 		return errors.New(protocol.ErrNotFound)
 	}
 
 	a.points = updated
+	a.persistPointsLocked()
+
+	if a.logger != nil {
+		a.logger.Log("DELETE", fmt.Sprintf("%s (%s)", targetName, pointID), "SUCCESS", "已成功刪除還原點及其差分檔案")
+	}
+
+	a.ipcServer.BroadcastEvent("restore_points_updated", a.points)
+	return nil
+}
+
+func (a *AgentCore) OverwriteRestorePoint(pointID string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	found := false
+	var targetName string
+	for i := range a.points {
+		if a.points[i].PointID == pointID {
+			targetName = a.points[i].Name
+			a.points[i].CreatedAt = time.Now().UTC().Format(time.RFC3339)
+			a.points[i].State = protocol.RestorePointStateReady
+			a.points[i].IsActive = true
+			found = true
+		} else {
+			a.points[i].IsActive = false
+		}
+	}
+	if !found {
+		if a.logger != nil {
+			a.logger.Log("OVERWRITE", pointID, "FAILED", "找不到指定的還原點")
+		}
+		return errors.New(protocol.ErrNotFound)
+	}
+
+	a.activePID = &pointID
+	a.persistPointsLocked()
+
+	if a.logger != nil {
+		a.logger.Log("OVERWRITE", fmt.Sprintf("%s (%s)", targetName, pointID), "SUCCESS", "已成功將當前系統狀態覆蓋更新至目標還原點")
+	}
+
 	a.ipcServer.BroadcastEvent("restore_points_updated", a.points)
 	return nil
 }

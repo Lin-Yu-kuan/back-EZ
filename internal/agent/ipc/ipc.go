@@ -25,6 +25,7 @@ type HandlerDelegate interface {
 	CreateRestorePoint(name, desc string) error
 	SwitchRestorePoint(pointID string) error
 	DeleteRestorePoint(pointID string) error
+	OverwriteRestorePoint(pointID string) error
 	SetAutoRestore(enabled bool) error
 	SetHubEndpoint(hubURL, enrollToken string) error
 	UninstallService() error
@@ -249,6 +250,19 @@ func (s *Server) dispatch(conn net.Conn, req protocol.IPCRequest) protocol.IPCRe
 			return errorResponse(req.ID, protocol.ErrInternal, err.Error())
 		}
 		return successResponse(req.ID, map[string]bool{"deleted": true})
+
+	case "OverwriteRestorePoint":
+		if err := s.verifyPassword(password); err != nil {
+			return errorResponse(req.ID, err.Error(), "authentication failed")
+		}
+		pointID, _ := params["point_id"].(string)
+		if pointID == "" {
+			return errorResponse(req.ID, protocol.ErrInvalidArgument, "point_id required")
+		}
+		if err := s.delegate.OverwriteRestorePoint(pointID); err != nil {
+			return errorResponse(req.ID, protocol.ErrInternal, err.Error())
+		}
+		return successResponse(req.ID, map[string]bool{"overwritten": true})
 
 	case "SetAutoRestore":
 		if err := s.verifyPassword(password); err != nil {

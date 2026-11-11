@@ -22,6 +22,7 @@ func (m *mockDelegate) ListRestorePoints() ([]protocol.RestorePoint, error) {
 func (m *mockDelegate) CreateRestorePoint(name, desc string) error { return nil }
 func (m *mockDelegate) SwitchRestorePoint(pointID string) error    { return nil }
 func (m *mockDelegate) DeleteRestorePoint(pointID string) error    { return nil }
+func (m *mockDelegate) OverwriteRestorePoint(pointID string) error { return nil }
 func (m *mockDelegate) SetAutoRestore(enabled bool) error          { return nil }
 func (m *mockDelegate) SetHubEndpoint(hubURL, token string) error  { return nil }
 func (m *mockDelegate) UninstallService() error                    { return nil }
