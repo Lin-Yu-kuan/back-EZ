@@ -107,4 +107,3 @@ func TestRestorer_ApplyAndSuccessFlag(t *testing.T) {
 		t.Fatalf("expected restore completed after apply")
 	}
 }
-

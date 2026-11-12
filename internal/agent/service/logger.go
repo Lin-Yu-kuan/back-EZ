@@ -90,4 +90,3 @@ func (l *OperationLogger) GetEntries() []LogEntry {
 func (l *OperationLogger) GetEntriesJSON() ([]byte, error) {
 	return json.Marshal(l.GetEntries())
 }
-

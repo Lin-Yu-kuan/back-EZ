@@ -22,6 +22,55 @@
 
 ---
 
+## 現階段範圍（2026-11-12）
+
+> [!IMPORTANT]
+> 現階段**只維護本機還原路徑**；中控台凍結但**不刪除**。範圍決策見 [`DECISIONS.md`](./DECISIONS.md) D9。
+
+**本機路徑（唯一主動維護範圍）**
+
+| 路徑 | 內容 |
+| :--- | :--- |
+| `cmd/gui` | 本機面板／GUI 入口 |
+| `internal/agent` | Agent 服務核心、IPC、本機面板 |
+| `internal/workers/vhdx` | 差分 VHDX 鏈、BCD、PE 開機 |
+| `internal/workers/homesku` | OS SKU（家用版）能力判定與降級路徑 |
+| `internal/protocol` | 與 SPEC §2 對應的共用契約（僅做本機路徑所需的最小必要修改） |
+
+**凍結範圍（不主動維護、不驗收、不刪碼）**
+
+- 中控台相關 Milestone：**Milestone 1、Milestone 2、Milestone 4** 於標題下標記 `- [!] PAUSED`。
+- 原因：**中控台凍結：現階段只專注本機還原；程式碼保留不刪，解凍需重新排程。**
+- 中控台程式碼含 `internal/hub/`、`web/`、`cmd/hub`、`cmd/mockagent`、`cmd/gen-ts`；其餘非本機路徑（`wol`／`multicast`／`netpreserve` 等）亦暫不主動維護。以上**一律不得刪除**、不得為縮減體積而移除（`internal/hub` 沒有 `cmd/hub` 進入點、不進 `back-ez.exe`，刪除對本機效率沒有幫助）。
+- 測試分流：本機工作一律使用 `scripts/test-local.ps1`；中控台既有測試不得刪除或停用，但不在現階段 DoD 內。
+
+---
+
+## A 案：本機還原誠實可用（Phase 0–4）
+
+> [!IMPORTANT]
+> **A 案**的判準是「誠實可用」：能力不足時明確拒絕，**不得回報假成功**。Phase 1–4 由不同工作流並行推進。
+
+> **驗收摘要（2026-11-12）**：Phase 0–4 完成。`gofmt -l cmd internal` 空、`go vet ./...`、`go build ./...`、`go test ./...` 全綠；`scripts/test-local.ps1` → `LOCAL TESTS OK (9.7s)`。實機（Windows 10 Pro 26300、非管理員、Fast Startup=1）`/api/system/status` 回報 12 項能力、`ready=false`、blockers＝`admin_token`／`vhdx_native_boot`／`base_vhdx_present`／`fast_startup_disabled`／`real_execution_enabled`。`D:\EZRestore\chain.json` 舊陣列已備份為 `chain.json.legacy-20261112T054403Z`。**A 案仍不能真的還原**：真實寫入需 B 案（一次性 VHDX 原生開機建置＋重建乾淨讀寫層）。工作區變更尚未 commit，待審核。
+
+- [x] **Phase 0：文件化與測試分流**
+  - **目標**：把「本機優先、中控台凍結不刪」寫進文件；建立 `scripts/test-local.ps1` 作為本機測試唯一入口；以 lightweight tag `hub-frozen` 標記凍結點。
+  - **驗收**：`pwsh -NoProfile -File scripts/test-local.ps1` 可執行且通過（本機若無 pwsh，改用 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-local.ps1`）；`git tag` 含 `hub-frozen`；TASKS／AGENT／DECISIONS 三份文件範圍敘述一致，既有段落編號與 checkbox 未被破壞。
+- [x] **Phase 1：能力偵測（第一道 gate）**
+  - **目標**：偵測 OS SKU（Home／Pro／Edu）、目前是否以 VHDX 原生開機、`base.vhdx` 是否存在、virtdisk 可用性、Fast Startup、BitLocker、管理員權限，作為所有還原操作前唯一的入口檢查。
+  - **驗收**：任一條件不符即拒絕操作並回報明確原因；能力報告可由面板／狀態 API 取得；不得以 DryRun 成功或假成功替代拒絕。
+- [x] **Phase 2：鏈單一寫入 + fail-closed**
+  - **目標**：`vhdx.Engine` 成為 `chain.json` 唯一寫入者（格式固定 `map[string]*RestorePoint`）；`AgentCore` 不再自行持久化；legacy 陣列格式改名 `chain.json.legacy-<UTC>` 後以空鏈啟動；A 案 `RealExecutionEnabled=false`。
+  - **驗收**：`RealExecutionEnabled=false` 下任何真實 `diskpart`／BCD 操作一律被拒絕且回報失敗（不得假成功）；「覆蓋此點」功能移除；legacy 備份檔存在且可追溯；鏈深與 `is_active` 唯一性皆有測試。
+- [x] **Phase 3：狀態 API／面板／啟動**
+  - **目標**：`cmd/gui`／本機面板提供誠實狀態（能力摘要、鏈現況、最近操作結果與不可用原因）；啟動流程在缺能力時不崩潰。
+  - **驗收**：面板顯示與實際能力一致；不可執行時顯示原因而非「成功」；啟動不 panic；狀態 API 有測試覆蓋。
+- [x] **Phase 4：獨立驗證**
+  - **目標**：不依賴中控台，以 `scripts/test-local.ps1` 與實機／VM 手動腳本獨立驗證本機還原路徑。
+  - **驗收**：本機測試腳本通過；實機或 VM 依 Phase 1–3 驗收逐項通過；結果回填本清單（日期／commit／一句話結果）。
+
+---
+
 ## Milestone 0：環境與工具鏈
 
 - [x] **Task 0.1：開發環境、測試機與工具鏈**
@@ -33,6 +82,8 @@
 ---
 
 ## Milestone 1：基礎建設與共享契約 (Foundation & Contracts)
+
+- [!] **PAUSED（中控台凍結）**：Milestone 1 屬中控台範圍（Hub server/store/ws、前端 codegen）。現階段不維護、不驗收；既有 `- [x]` 維持完成記錄，不代表解凍。**中控台凍結：現階段只專注本機還原；程式碼保留不刪，解凍需重新排程。**（例外：`internal/protocol` 屬本機路徑，僅做本機所需的最小必要修改。）
 
 - [x] **Task 1.1：專案骨架與共享資料模型 (`internal/protocol`)**
   - **目標**：`go mod init`、建立 [`AGENT.md`](./AGENT.md) §3 目錄；把 SPEC §2.1–§2.5 全部 JSON Schema 轉為 Go struct（含列舉、`null` 語意、`omitempty` 規則）；SPEC §2.6 轉移表以 `IsValidTransition` 驗證函式實作；`testdata/*.json` golden 樣本與 SPEC 範例逐位元組一致。
@@ -81,6 +132,8 @@
 ## Milestone 2：中控台前端與本機鎖定面板 (Web Dashboard & Client UI)
 
 > 任務可依依賴關係與 M3 交錯進行；不必嚴格照編號順序。
+
+- [!] **PAUSED（中控台凍結）**：Milestone 2 以中控台前端為主（僅 Task 2.3 本機面板屬本機路徑、維持原狀不在此列）。現階段不維護、不驗收；既有 `- [x]` 維持完成記錄。**中控台凍結：現階段只專注本機還原；程式碼保留不刪，解凍需重新排程。**
 
 - [x] **Task 2.1：React 前端骨架與 API/WS 客戶端**
   - **目標**：Vite + React + TypeScript `strict: true` + Tailwind；登入頁；WS 自動重連 Hook（重連後重抓全量）；API client 處理 `ok`／`error` 封套與 CSRF header；型別一律來自 `src/types/spec.ts`（Task 1.7 產物）。
@@ -143,6 +196,8 @@
 ---
 
 ## Milestone 4：母機直傳群播與 IP/電腦名稱自記憶復原 (Direct Multicast & Network Preserve)
+
+- [!] **PAUSED（中控台凍結）**：Milestone 4 屬派送／群播鏈（中控台範圍），現階段不維護、不驗收；既有 `- [x]` 維持完成記錄。**中控台凍結：現階段只專注本機還原；程式碼保留不刪，解凍需重新排程。**
 
 - [x] **Task 4.1：網路身分快照擷取器 (`internal/workers/netpreserve/capture`)**
   - **目標**：讀取網卡模式（`STATIC`／`DHCP`）、IP、遮罩、閘道、DNS 與 `original_hostname`；產出 `NetworkIdentity`；同步上報 Hub 與寫入本機保留區（含校驗）。

@@ -136,4 +136,3 @@ func IsRestoreCompleted(reserveRoot string) bool {
 	info, err := os.Stat(flagFile)
 	return err == nil && !info.IsDir()
 }
-

@@ -3,6 +3,7 @@ package vhdx
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,20 +17,25 @@ const MaxChainDepth = 5
 
 // Config defines the configuration for the VHDX differential restore point engine.
 type Config struct {
-	DryRun           bool   // When true, generate executable scripts and logs without touching real disk/BCD.
-	AllowDestructive bool   // When DryRun is false, must be explicitly true with risk acknowledged.
-	VolumeGUID       string // Volume GUID of the reserve partition (e.g. `\\?\Volume{12345678-1234-1234-1234-123456789abc}\`).
-	ReserveRoot      string // Relative path or directory under the volume (e.g. "EZRestore").
-	BCDEntryID       string // Target BCD boot entry ID, default "{default}".
-	DataDir          string // Directory where metadata (chain.json) is persisted.
+	DryRun           bool // When true, generate executable scripts and logs without touching real disk/BCD.
+	AllowDestructive bool // When DryRun is false, must be explicitly true with risk acknowledged.
+	// RealExecutionEnabled 必須由 B 案（真正實作 VHDX 原生開機與 BCD 專用開機項）明確設為 true。
+	// A 案一律為 false：任何真實 diskpart/BCD 操作都會被拒絕，避免用半成品流程動到磁碟。
+	RealExecutionEnabled bool
+	VolumeGUID           string // Volume GUID of the reserve partition (e.g. `\\?\Volume{12345678-1234-1234-1234-123456789abc}\`).
+	ReserveRoot          string // 保留區根目錄；cmd/gui 傳絕對實體路徑，測試可傳相對於磁碟區的路徑。
+	ReserveRelPath       string // 保留區相對於磁碟區根目錄的子路徑（例如 "EZRestore"）；空值時由 ReserveRoot 推導。
+	BCDEntryID           string // Target BCD boot entry ID, default "{default}".
+	DataDir              string // Directory where metadata (chain.json) is persisted; 同時作為實體檔案根目錄。
 }
 
 // Engine manages the differential VHDX chain, BCD boot indicators, and DryRun scripts.
 type Engine struct {
-	mu       sync.Mutex
-	cfg      Config
-	chain    *Chain
-	executor CommandExecutor
+	mu          sync.Mutex
+	cfg         Config
+	chain       *Chain
+	executor    CommandExecutor
+	loadWarning string
 }
 
 // VHDXError wraps error with protocol-compliant error code.
@@ -43,6 +49,9 @@ func (e *VHDXError) Error() string {
 }
 
 // NewEngine creates a new VHDX restore point engine instance.
+//
+// 舊版 AgentCore 曾把 chain.json 寫成 JSON 陣列；這裡會偵測、備份為
+// chain.json.legacy-<UTC> 並以空鏈啟動，而不是讓整個功能永遠載入失敗。
 func NewEngine(cfg Config, exec CommandExecutor) (*Engine, error) {
 	if cfg.BCDEntryID == "" {
 		cfg.BCDEntryID = "{default}"
@@ -55,18 +64,80 @@ func NewEngine(cfg Config, exec CommandExecutor) (*Engine, error) {
 	}
 
 	chain := NewChain()
+	loadWarning := ""
 	if cfg.DataDir != "" {
 		metaFile := filepath.Join(cfg.DataDir, "chain.json")
-		if err := chain.LoadFromFile(metaFile); err != nil && !errors.Is(err, ErrMetadataNotFound) {
+		err := chain.LoadFromFile(metaFile)
+		switch {
+		case err == nil:
+		case errors.Is(err, ErrMetadataNotFound):
+			// 首次啟動，尚未有鏈資料。
+		case errors.Is(err, ErrLegacyArrayFormat):
+			backup := metaFile + ".legacy-" + time.Now().UTC().Format("20060102T150405Z")
+			if renameErr := os.Rename(metaFile, backup); renameErr != nil {
+				return nil, fmt.Errorf("failed to archive legacy chain metadata: %w", renameErr)
+			}
+			loadWarning = fmt.Sprintf("偵測到舊版 chain.json（JSON 陣列格式），已備份為 %s 並以空鏈啟動", filepath.Base(backup))
+		default:
 			return nil, fmt.Errorf("failed to load chain metadata: %w", err)
 		}
 	}
 
-	return &Engine{
-		cfg:      cfg,
-		chain:    chain,
-		executor: exec,
-	}, nil
+	eng := &Engine{
+		cfg:         cfg,
+		chain:       chain,
+		executor:    exec,
+		loadWarning: loadWarning,
+	}
+
+	if len(chain.Points) > 0 {
+		if verr := chain.Validate(); verr != nil {
+			chain.MarkAllBroken()
+			// 載入階段盡力而為：持久化失敗只影響 BROKEN 狀態是否落盤。
+			_ = eng.persistMetadataLocked()
+			if loadWarning != "" {
+				loadWarning += "；"
+			}
+			loadWarning += fmt.Sprintf("還原點鏈完整性檢查失敗，已全部標記為 BROKEN：%v", verr)
+		}
+	}
+
+	return eng, nil
+}
+
+// LoadWarning 回傳載入期間發生的可復原問題（例如舊格式遷移、鏈損壞）。
+func (e *Engine) LoadWarning() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.loadWarning
+}
+
+// DryRun 回報引擎是否只做模擬（不修改磁碟／BCD）。
+func (e *Engine) DryRun() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.cfg.DryRun
+}
+
+// AllowDestructive 回報引擎是否允許破壞性操作。
+func (e *Engine) AllowDestructive() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.cfg.AllowDestructive
+}
+
+func (e *Engine) physicalRoot() string {
+	if e.cfg.DataDir != "" {
+		return e.cfg.DataDir
+	}
+	return e.cfg.ReserveRoot
+}
+
+func (e *Engine) physicalPath(vhdxFile string) string {
+	if filepath.IsAbs(vhdxFile) {
+		return vhdxFile
+	}
+	return filepath.Join(e.physicalRoot(), vhdxFile)
 }
 
 // InitBase initializes the base restore point (depth = 0) if the chain is empty.
@@ -99,8 +170,77 @@ func (e *Engine) InitBase(name, description, vhdxFile string, sizeBytes int64) (
 	if err := e.chain.AddPoint(base); err != nil {
 		return nil, err
 	}
-	e.persistMetadataLocked()
+	e.chain.SetActive(base.PointID)
+	if err := e.persistMetadataLocked(); err != nil {
+		return base, err
+	}
 	return base, nil
+}
+
+// EnsureBase 只在保留區真的存在 base.vhdx 時建立基準節點。
+// 若檔案不存在（尚未完成 VHDX 原生開機建置），回傳 CAPABILITY_UNSUPPORTED，
+// 讓上層明確告訴使用者「缺什麼」，而不是捏造一個不存在的 base.vhdx。
+func (e *Engine) EnsureBase(name, description string) (*protocol.RestorePoint, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	points := e.chain.List()
+	if len(points) > 0 {
+		for _, p := range points {
+			if p.IsBase {
+				cp := p
+				return &cp, nil
+			}
+		}
+		return nil, &VHDXError{
+			Code:    protocol.ErrInvalidState,
+			Message: "還原點鏈已存在但找不到基準節點（metadata 損壞）",
+		}
+	}
+
+	baseFile := "base.vhdx"
+	info, err := os.Stat(e.physicalPath(baseFile))
+	if err != nil || info.IsDir() {
+		return nil, &VHDXError{
+			Code: protocol.ErrCapabilityUnsupported,
+			Message: fmt.Sprintf(
+				"尚未建立基準磁碟 %s；請先完成「實體機 → VHDX 原生開機」一次性建置",
+				e.physicalPath(baseFile)),
+		}
+	}
+
+	if strings.TrimSpace(name) == "" {
+		name = "Base System"
+	}
+	if strings.TrimSpace(description) == "" {
+		description = "Original Clean Base Image"
+	}
+
+	base := &protocol.RestorePoint{
+		PointID:     "rp_base",
+		Name:        name,
+		Description: description,
+		VHDXFile:    baseFile,
+		ParentID:    nil,
+		Depth:       0,
+		SizeBytes:   info.Size(),
+		IsBase:      true,
+		IsActive:    true,
+		State:       protocol.RestorePointStateReady,
+		CreatedBy:   protocol.CreatedBySystem,
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+	}
+
+	if err := e.chain.AddPoint(base); err != nil {
+		return nil, err
+	}
+	e.chain.SetActive(base.PointID)
+	if err := e.persistMetadataLocked(); err != nil {
+		return base, err
+	}
+
+	cp := *base
+	return &cp, nil
 }
 
 // ResetAfterDeploy cleans up all existing differential restore points and initializes a fresh base point (Decision D8).
@@ -108,12 +248,19 @@ func (e *Engine) ResetAfterDeploy(baseName, baseDescription, baseVHDXFile string
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	if err := e.preflightRealLocked("RESET", ""); err != nil {
+		return nil, nil, err
+	}
+
 	// 1. Gather all non-base points to delete diff files
 	var delSteps []ExecutionStep
 	stepOrder := 1
 	for _, p := range e.chain.Points {
 		if !p.IsBase {
-			diffPath, _ := e.resolvePaths(p.VHDXFile)
+			diffPath, _, pathErr := e.resolvePaths(p.VHDXFile)
+			if pathErr != nil {
+				return nil, nil, pathErr
+			}
 			delSteps = append(delSteps, ExecutionStep{
 				Order:       stepOrder,
 				Category:    "FILE",
@@ -136,7 +283,10 @@ func (e *Engine) ResetAfterDeploy(baseName, baseDescription, baseVHDXFile string
 		baseVHDXFile = "base.vhdx"
 	}
 
-	_, baseBCD := e.resolvePaths(baseVHDXFile)
+	_, baseBCD, pathErr := e.resolvePaths(baseVHDXFile)
+	if pathErr != nil {
+		return nil, nil, pathErr
+	}
 	delSteps = append(delSteps,
 		ExecutionStep{
 			Order:       stepOrder,
@@ -184,7 +334,9 @@ func (e *Engine) ResetAfterDeploy(baseName, baseDescription, baseVHDXFile string
 		return nil, plan, err
 	}
 	e.chain.SetActive(newBase.PointID)
-	e.persistMetadataLocked()
+	if err := e.persistMetadataLocked(); err != nil {
+		return newBase, plan, err
+	}
 
 	return newBase, plan, nil
 }
@@ -230,6 +382,10 @@ func (e *Engine) Create(req CreateRequest) (*protocol.RestorePoint, *ExecutionPl
 		}
 	}
 
+	if err := e.preflightRealLocked("CREATE", parent.VHDXFile); err != nil {
+		return nil, nil, err
+	}
+
 	// 2. Depth check (SPEC §2.2: depth <= 5, otherwise RESTORE_POINT_LIMIT)
 	newDepth := parent.Depth + 1
 	if newDepth > MaxChainDepth {
@@ -239,10 +395,14 @@ func (e *Engine) Create(req CreateRequest) (*protocol.RestorePoint, *ExecutionPl
 		}
 	}
 
-	// 3. ID and file generation
+	// 3. ID and file generation (同秒建立時加上序號，避免撞 ID)
 	pointID := req.PointID
 	if pointID == "" {
-		pointID = fmt.Sprintf("rp_%s", time.Now().UTC().Format("20060102_150405"))
+		baseID := fmt.Sprintf("rp_%s", time.Now().UTC().Format("20060102_150405"))
+		pointID = baseID
+		for i := 2; e.chain.GetPoint(pointID) != nil; i++ {
+			pointID = fmt.Sprintf("%s_%d", baseID, i)
+		}
 	}
 	if e.chain.GetPoint(pointID) != nil {
 		return nil, nil, &VHDXError{
@@ -274,7 +434,10 @@ func (e *Engine) Create(req CreateRequest) (*protocol.RestorePoint, *ExecutionPl
 	}
 
 	// 4. Generate Execution Plan (diskpart to create diff disk, BCD backup and update)
-	plan := e.generateCreatePlan(parent, newPoint)
+	plan, err := e.generateCreatePlan(parent, newPoint)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// 5. Execute plan (or dry run)
 	if err := e.executePlan(plan); err != nil {
@@ -286,12 +449,17 @@ func (e *Engine) Create(req CreateRequest) (*protocol.RestorePoint, *ExecutionPl
 		return nil, nil, err
 	}
 	e.chain.SetActive(newPoint.PointID)
-	e.persistMetadataLocked()
+	if err := e.persistMetadataLocked(); err != nil {
+		return newPoint, plan, err
+	}
 
 	return newPoint, plan, nil
 }
 
 // Switch switches the active boot indicator to the target restore point.
+//
+// 注意：直接的「切換」只能指到葉節點。若目標仍有子節點，開機進該層會讓所有子節點失效
+// （VHDX 差分鏈的硬限制），因此一律拒絕；真正的「重建乾淨讀寫層」屬 B 案。
 func (e *Engine) Switch(pointID string) (*ExecutionPlan, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -311,15 +479,32 @@ func (e *Engine) Switch(pointID string) (*ExecutionPlan, error) {
 		}
 	}
 
-	// Generate switch plan
-	plan := e.generateSwitchPlan(target)
+	if children := e.chain.GetChildren(pointID); len(children) > 0 {
+		return nil, &VHDXError{
+			Code: protocol.ErrInvalidState,
+			Message: fmt.Sprintf(
+				"還原點 %s 仍有 %d 個子節點；直接開機進上層會使其失效，需改用『基於目標點重建乾淨讀寫層』（B 案）",
+				pointID, len(children)),
+		}
+	}
+
+	if err := e.preflightRealLocked("SWITCH", target.VHDXFile); err != nil {
+		return nil, err
+	}
+
+	plan, err := e.generateSwitchPlan(target)
+	if err != nil {
+		return nil, err
+	}
 
 	if err := e.executePlan(plan); err != nil {
 		return plan, fmt.Errorf("failed to execute switch plan: %w", err)
 	}
 
 	e.chain.SetActive(pointID)
-	e.persistMetadataLocked()
+	if err := e.persistMetadataLocked(); err != nil {
+		return plan, err
+	}
 	return plan, nil
 }
 
@@ -361,7 +546,14 @@ func (e *Engine) Delete(pointID string) (*ExecutionPlan, error) {
 		}
 	}
 
-	plan := e.generateDeletePlan(target)
+	if err := e.preflightRealLocked("DELETE", target.VHDXFile); err != nil {
+		return nil, err
+	}
+
+	plan, err := e.generateDeletePlan(target)
+	if err != nil {
+		return nil, err
+	}
 	if err := e.executePlan(plan); err != nil {
 		return plan, fmt.Errorf("failed to execute delete plan: %w", err)
 	}
@@ -369,7 +561,9 @@ func (e *Engine) Delete(pointID string) (*ExecutionPlan, error) {
 	if err := e.chain.RemovePoint(pointID); err != nil {
 		return plan, err
 	}
-	e.persistMetadataLocked()
+	if err := e.persistMetadataLocked(); err != nil {
+		return plan, err
+	}
 	return plan, nil
 }
 
@@ -394,11 +588,55 @@ func (e *Engine) GetActive() *protocol.RestorePoint {
 	return e.chain.GetActivePoint()
 }
 
-func (e *Engine) persistMetadataLocked() {
-	if e.cfg.DataDir != "" {
-		metaFile := filepath.Join(e.cfg.DataDir, "chain.json")
-		_ = e.chain.SaveToFile(metaFile)
+func (e *Engine) persistMetadataLocked() error {
+	if e.cfg.DataDir == "" {
+		return nil
 	}
+	metaFile := filepath.Join(e.cfg.DataDir, "chain.json")
+	if err := e.chain.SaveToFile(metaFile); err != nil {
+		return fmt.Errorf("鏈資料寫入失敗（重啟後可能遺失）：%w", err)
+	}
+	return nil
+}
+
+// preflightRealLocked 是「真實執行」的總開關。DryRun 時一律放行。
+// A 案 RealExecutionEnabled 固定為 false，因此任何真實 diskpart/BCD 操作都會被拒絕，
+// 不會出現「假成功」或半成品指令動到磁碟。
+func (e *Engine) preflightRealLocked(action, vhdxFile string) error {
+	if e.cfg.DryRun {
+		return nil
+	}
+	if !e.cfg.AllowDestructive {
+		return &VHDXError{
+			Code:    protocol.ErrForbidden,
+			Message: "destructive operations are disabled; AllowDestructive must be true",
+		}
+	}
+	if !e.cfg.RealExecutionEnabled {
+		return &VHDXError{
+			Code:    protocol.ErrCapabilityUnsupported,
+			Message: "真實還原流程尚未啟用（B 案）；目前僅提供 DryRun 預覽，不會修改磁碟或 BCD",
+		}
+	}
+	if e.cfg.BCDEntryID == "" || e.cfg.BCDEntryID == "{default}" {
+		return &VHDXError{
+			Code:    protocol.ErrInvalidState,
+			Message: "BCD 開機項不可使用 {default}；必須建立專用開機項（B 案）",
+		}
+	}
+	if _, _, err := e.resolvePaths("preflight.vhdx"); err != nil {
+		return err
+	}
+	if (action == "CREATE" || action == "SWITCH") && vhdxFile != "" {
+		phys := e.physicalPath(vhdxFile)
+		if info, err := os.Stat(phys); err != nil || info.IsDir() {
+			return &VHDXError{
+				Code:    protocol.ErrInvalidState,
+				Message: fmt.Sprintf("目標 VHDX 不存在：%s", phys),
+			}
+		}
+	}
+	return nil
 }
 
 func (e *Engine) executePlan(plan *ExecutionPlan) error {
@@ -411,6 +649,11 @@ func (e *Engine) executePlan(plan *ExecutionPlan) error {
 			Message: "destructive operations are disabled; AllowDestructive must be true",
 		}
 	}
+	if !e.cfg.RealExecutionEnabled {
+		return &VHDXError{
+			Code:    protocol.ErrCapabilityUnsupported,
+			Message: "真實還原流程尚未啟用（B 案）；目前僅提供 DryRun 預覽",
+		}
+	}
 	return e.executor.Execute(plan)
 }
-

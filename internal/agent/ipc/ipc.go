@@ -25,7 +25,6 @@ type HandlerDelegate interface {
 	CreateRestorePoint(name, desc string) error
 	SwitchRestorePoint(pointID string) error
 	DeleteRestorePoint(pointID string) error
-	OverwriteRestorePoint(pointID string) error
 	SetAutoRestore(enabled bool) error
 	SetHubEndpoint(hubURL, enrollToken string) error
 	UninstallService() error
@@ -252,17 +251,12 @@ func (s *Server) dispatch(conn net.Conn, req protocol.IPCRequest) protocol.IPCRe
 		return successResponse(req.ID, map[string]bool{"deleted": true})
 
 	case "OverwriteRestorePoint":
+		// 相容舊版 client：功能已移除（差分鏈無法把執行中系統寫回舊節點）。
 		if err := s.verifyPassword(password); err != nil {
 			return errorResponse(req.ID, err.Error(), "authentication failed")
 		}
-		pointID, _ := params["point_id"].(string)
-		if pointID == "" {
-			return errorResponse(req.ID, protocol.ErrInvalidArgument, "point_id required")
-		}
-		if err := s.delegate.OverwriteRestorePoint(pointID); err != nil {
-			return errorResponse(req.ID, protocol.ErrInternal, err.Error())
-		}
-		return successResponse(req.ID, map[string]bool{"overwritten": true})
+		return errorResponse(req.ID, protocol.ErrCapabilityUnsupported,
+			"「覆蓋此點」已移除：差分鏈無法把目前執行中的系統寫回既有還原點")
 
 	case "SetAutoRestore":
 		if err := s.verifyPassword(password); err != nil {

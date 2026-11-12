@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/windows/registry"
 )
 
 // Edition represents the detected Windows edition.
@@ -17,10 +19,6 @@ const (
 	EditionEducation  Edition = "Education"
 	EditionUnknown    Edition = "Unknown"
 )
-
-// ProGVLKKey is Microsoft's official Generic Volume License Key for Windows 10/11 Pro.
-// This key triggers an in-place upgrade from Home to Pro without reinstalling Windows.
-const ProGVLKKey = "VK7JG-NPHTM-C97JM-9MPGT-3V66T"
 
 // Detector detects the current Windows SKU edition.
 type Detector struct{}
@@ -39,19 +37,48 @@ func (d *Detector) DetectEdition() (Edition, error) {
 	}
 
 	editionID := strings.TrimSpace(string(out))
+	if edition := DetectEditionFromString(editionID); edition != EditionUnknown {
+		return edition, nil
+	}
+	// Preserve the historical fallback: unrecognized EditionID strings are
+	// returned verbatim instead of being collapsed to Unknown.
+	return Edition(editionID), nil
+}
+
+// DetectEditionFromString maps a raw registry EditionID value to a normalized
+// Edition. It performs no I/O and is the single source of the edition mapping.
+func DetectEditionFromString(editionID string) Edition {
 	switch {
 	case strings.Contains(strings.ToLower(editionID), "core"),
 		strings.Contains(strings.ToLower(editionID), "home"):
-		return EditionHome, nil
+		return EditionHome
 	case strings.Contains(strings.ToLower(editionID), "pro"):
-		return EditionPro, nil
+		return EditionPro
 	case strings.Contains(strings.ToLower(editionID), "enterprise"):
-		return EditionEnterprise, nil
+		return EditionEnterprise
 	case strings.Contains(strings.ToLower(editionID), "education"):
-		return EditionEducation, nil
+		return EditionEducation
 	default:
-		return Edition(editionID), nil
+		return EditionUnknown
 	}
+}
+
+// DetectEditionFromRegistry reads the EditionID value directly from the
+// registry (no PowerShell child process) and normalizes it with
+// DetectEditionFromString.
+func DetectEditionFromRegistry() (Edition, error) {
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE,
+		`SOFTWARE\Microsoft\Windows NT\CurrentVersion`, registry.QUERY_VALUE)
+	if err != nil {
+		return EditionUnknown, fmt.Errorf("failed to open CurrentVersion registry key: %w", err)
+	}
+	defer key.Close()
+
+	editionID, _, err := key.GetStringValue("EditionID")
+	if err != nil {
+		return EditionUnknown, fmt.Errorf("failed to read registry EditionID: %w", err)
+	}
+	return DetectEditionFromString(strings.TrimSpace(editionID)), nil
 }
 
 // IsHomeEdition returns true if the current system is Windows Home edition.
@@ -62,12 +89,3 @@ func (d *Detector) IsHomeEdition() bool {
 	}
 	return ed == EditionHome
 }
-
-// UnlockPro triggers Microsoft's official changepk.exe with explicit UAC elevation (-Verb RunAs).
-func (d *Detector) UnlockPro() error {
-	psScript := fmt.Sprintf(`Start-Process "changepk.exe" -ArgumentList "/ProductKey %s" -Verb RunAs`, ProGVLKKey)
-	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", psScript)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	return cmd.Start()
-}
-

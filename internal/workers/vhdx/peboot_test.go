@@ -116,4 +116,3 @@ func TestPEBoot_TriggerOneTimeBootAndRollback(t *testing.T) {
 		t.Fatalf("rollback should run bcdedit /import, got: %s", mockExec.RollbackLogs[0])
 	}
 }
-

@@ -1,6 +1,7 @@
 package vhdx_test
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -147,13 +148,18 @@ func TestEngine_DeleteRules(t *testing.T) {
 		t.Fatalf("expected INVALID_STATE when deleting point with children, got %v", err)
 	}
 
-	// Switch active back to rp_base so child 2 becomes non-active leaf
-	_, err = eng.Switch("rp_base")
+	// Create a sibling of child 2 under child 1 so child 2 becomes a non-active leaf.
+	_, _, err = eng.Create(vhdx.CreateRequest{
+		PointID:   "rp_child_2b",
+		Name:      "Child 2b",
+		ParentID:  &pChild1,
+		CreatedBy: protocol.CreatedByAdminLocal,
+	})
 	if err != nil {
-		t.Fatalf("failed to switch back to base: %v", err)
+		t.Fatalf("failed to create sibling child 2b: %v", err)
 	}
 
-	// 4. Now child 2 is non-active leaf, delete must succeed
+	// 4. Now child 2 is a non-active leaf, delete must succeed
 	deletePlan, err := eng.Delete("rp_child_2")
 	if err != nil {
 		t.Fatalf("failed to delete leaf point child 2: %v", err)
@@ -182,6 +188,17 @@ func TestEngine_SwitchPoint(t *testing.T) {
 		t.Fatalf("create failed: %v", err)
 	}
 
+	// 建立同層兄弟節點，讓 child_2 成為 active、child_1 成為非 active 的葉節點
+	_, _, err = eng.Create(vhdx.CreateRequest{
+		PointID:   "rp_child_2",
+		Name:      "Child 2",
+		ParentID:  &pBase,
+		CreatedBy: protocol.CreatedByAdminLocal,
+	})
+	if err != nil {
+		t.Fatalf("create sibling failed: %v", err)
+	}
+
 	// Non-existent point
 	_, err = eng.Switch("rp_not_exist")
 	if err == nil {
@@ -192,22 +209,31 @@ func TestEngine_SwitchPoint(t *testing.T) {
 		t.Fatalf("expected NOT_FOUND, got %v", err)
 	}
 
-	// Switch to rp_base
-	plan, err := eng.Switch("rp_base")
+	// 切換到仍有子節點的 base 必須被拒絕（避免污染子節點快照）
+	_, err = eng.Switch("rp_base")
+	if err == nil {
+		t.Fatalf("expected error switching to point with children, got nil")
+	}
+	if !errors.As(err, &vErr) || vErr.Code != protocol.ErrInvalidState {
+		t.Fatalf("expected INVALID_STATE when switching to point with children, got %v", err)
+	}
+
+	// Switch to leaf rp_child_1
+	plan, err := eng.Switch("rp_child_1")
 	if err != nil {
-		t.Fatalf("failed to switch to rp_base: %v", err)
+		t.Fatalf("failed to switch to rp_child_1: %v", err)
 	}
 	if plan.Action != "SWITCH" {
 		t.Fatalf("expected action SWITCH, got %s", plan.Action)
 	}
 
 	active := eng.GetActive()
-	if active == nil || active.PointID != "rp_base" {
-		t.Fatalf("expected active point to be rp_base, got %+v", active)
+	if active == nil || active.PointID != "rp_child_1" {
+		t.Fatalf("expected active point to be rp_child_1, got %+v", active)
 	}
-	child1 := eng.Get("rp_child_1")
-	if child1.IsActive {
-		t.Fatalf("rp_child_1 should not be active after switch")
+	child2 := eng.Get("rp_child_2")
+	if child2.IsActive {
+		t.Fatalf("rp_child_2 should not be active after switch")
 	}
 }
 
@@ -262,12 +288,20 @@ func TestEngine_RollbackOnFailure(t *testing.T) {
 	mockExec := vhdx.NewMockExecutor()
 	mockExec.FailStep = 3 // Step 3 is BCD device update
 
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "base.vhdx"), []byte("vhdx"), 0644); err != nil {
+		t.Fatalf("failed to create fake base.vhdx: %v", err)
+	}
+
 	cfg := vhdx.Config{
-		DryRun:           false,
-		AllowDestructive: true,
-		VolumeGUID:       `\\?\Volume{11111111-2222-3333-4444-555555555555}\`,
-		ReserveRoot:      "EZRestore",
-		BCDEntryID:       "{default}",
+		DryRun:               false,
+		AllowDestructive:     true,
+		RealExecutionEnabled: true,
+		VolumeGUID:           `\\?\Volume{11111111-2222-3333-4444-555555555555}\`,
+		ReserveRoot:          "EZRestore",
+		ReserveRelPath:       "EZRestore",
+		BCDEntryID:           "{current}",
+		DataDir:              tmpDir,
 	}
 
 	eng, err := vhdx.NewEngine(cfg, mockExec)
@@ -300,9 +334,11 @@ func TestEngine_RollbackOnFailure(t *testing.T) {
 func TestEngine_Persistence(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := vhdx.Config{
-		DryRun:      true,
-		ReserveRoot: "EZRestore",
-		DataDir:     tmpDir,
+		DryRun:         true,
+		VolumeGUID:     `\\?\Volume{12345678-1234-1234-1234-123456789abc}\`,
+		ReserveRoot:    "EZRestore",
+		ReserveRelPath: "EZRestore",
+		DataDir:        tmpDir,
 	}
 
 	eng1, err := vhdx.NewEngine(cfg, nil)
@@ -410,5 +446,207 @@ func TestEngine_ResetAfterDeploy(t *testing.T) {
 	}
 	if points[0].PointID != newBase.PointID {
 		t.Fatalf("expected point ID %s, got %s", newBase.PointID, points[0].PointID)
+	}
+}
+
+func TestEngine_LegacyArrayMetadataMigration(t *testing.T) {
+	tmpDir := t.TempDir()
+	legacy := `[{"point_id":"rp_base","name":"Base System","is_base":true,"is_active":true,"state":"READY"}]`
+	metaFile := filepath.Join(tmpDir, "chain.json")
+	if err := os.WriteFile(metaFile, []byte(legacy), 0644); err != nil {
+		t.Fatalf("failed to write legacy chain.json: %v", err)
+	}
+
+	cfg := vhdx.Config{DryRun: true, ReserveRoot: "EZRestore", DataDir: tmpDir}
+	eng, err := vhdx.NewEngine(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewEngine must tolerate legacy array metadata, got: %v", err)
+	}
+	if len(eng.List()) != 0 {
+		t.Fatalf("legacy chain should start empty, got %d points", len(eng.List()))
+	}
+	if eng.LoadWarning() == "" {
+		t.Fatalf("expected a load warning describing the legacy migration")
+	}
+
+	backups, _ := filepath.Glob(metaFile + ".legacy-*")
+	if len(backups) != 1 {
+		t.Fatalf("expected exactly one legacy backup, got %v", backups)
+	}
+
+	// 第二次啟動不應再遇到 legacy 格式，也不應重複備份。
+	eng2, err := vhdx.NewEngine(cfg, nil)
+	if err != nil {
+		t.Fatalf("second NewEngine failed: %v", err)
+	}
+	if strings.Contains(eng2.LoadWarning(), "舊版") {
+		t.Fatalf("legacy migration must only happen once, warning=%q", eng2.LoadWarning())
+	}
+	backups2, _ := filepath.Glob(metaFile + ".legacy-*")
+	if len(backups2) != 1 {
+		t.Fatalf("expected legacy backup count to stay 1, got %v", backups2)
+	}
+}
+
+func TestEngine_EnsureBaseRequiresProvisionedDisk(t *testing.T) {
+	tmpDir := t.TempDir()
+	eng, err := vhdx.NewEngine(vhdx.Config{DryRun: true, ReserveRoot: "EZRestore", DataDir: tmpDir}, nil)
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
+
+	_, err = eng.EnsureBase("", "")
+	if err == nil {
+		t.Fatalf("expected EnsureBase to fail without base.vhdx")
+	}
+	var vErr *vhdx.VHDXError
+	if !errors.As(err, &vErr) || vErr.Code != protocol.ErrCapabilityUnsupported {
+		t.Fatalf("expected CAPABILITY_UNSUPPORTED, got %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "base.vhdx"), []byte("vhdx"), 0644); err != nil {
+		t.Fatalf("failed to create fake base.vhdx: %v", err)
+	}
+	base, err := eng.EnsureBase("", "")
+	if err != nil {
+		t.Fatalf("EnsureBase failed with base.vhdx present: %v", err)
+	}
+	if base == nil || !base.IsBase || base.Depth != 0 || base.SizeBytes != 4 {
+		t.Fatalf("invalid base point: %+v", base)
+	}
+	if active := eng.GetActive(); active == nil || active.PointID != base.PointID {
+		t.Fatalf("base point should be active, got %+v", active)
+	}
+}
+
+func TestEngine_RealExecutionFailClosed(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "base.vhdx"), []byte("vhdx"), 0644); err != nil {
+		t.Fatalf("failed to create fake base.vhdx: %v", err)
+	}
+
+	mockExec := vhdx.NewMockExecutor()
+	cfg := vhdx.Config{
+		DryRun:               false,
+		AllowDestructive:     true,
+		RealExecutionEnabled: false, // A 案：一律 fail-closed
+		VolumeGUID:           `\\?\Volume{11111111-2222-3333-4444-555555555555}\`,
+		ReserveRoot:          "EZRestore",
+		ReserveRelPath:       "EZRestore",
+		BCDEntryID:           "{current}",
+		DataDir:              tmpDir,
+	}
+	eng, err := vhdx.NewEngine(cfg, mockExec)
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
+	if _, err := eng.InitBase("Base", "Base", "base.vhdx", 4); err != nil {
+		t.Fatalf("InitBase failed: %v", err)
+	}
+
+	pBase := "rp_base"
+	_, _, err = eng.Create(vhdx.CreateRequest{
+		PointID:   "rp_blocked",
+		Name:      "Blocked",
+		ParentID:  &pBase,
+		CreatedBy: protocol.CreatedByAdminLocal,
+	})
+	if err == nil {
+		t.Fatalf("expected real execution to be refused when RealExecutionEnabled=false")
+	}
+	var vErr *vhdx.VHDXError
+	if !errors.As(err, &vErr) || vErr.Code != protocol.ErrCapabilityUnsupported {
+		t.Fatalf("expected CAPABILITY_UNSUPPORTED, got %v", err)
+	}
+	if len(mockExec.ExecutedLogs) != 0 {
+		t.Fatalf("executor must not run while real execution is disabled, got %v", mockExec.ExecutedLogs)
+	}
+}
+
+func TestEngine_DeleteValidatesBeforeExecution(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "base.vhdx"), []byte("vhdx"), 0644); err != nil {
+		t.Fatalf("failed to create fake base.vhdx: %v", err)
+	}
+
+	mockExec := vhdx.NewMockExecutor()
+	cfg := vhdx.Config{
+		DryRun:               false,
+		AllowDestructive:     true,
+		RealExecutionEnabled: true,
+		VolumeGUID:           `\\?\Volume{11111111-2222-3333-4444-555555555555}\`,
+		ReserveRoot:          "EZRestore",
+		ReserveRelPath:       "EZRestore",
+		BCDEntryID:           "{current}",
+		DataDir:              tmpDir,
+	}
+	eng, err := vhdx.NewEngine(cfg, mockExec)
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
+	if _, err := eng.InitBase("Base", "Base", "base.vhdx", 4); err != nil {
+		t.Fatalf("InitBase failed: %v", err)
+	}
+
+	_, err = eng.Delete("rp_base")
+	var vErr *vhdx.VHDXError
+	if !errors.As(err, &vErr) || vErr.Code != protocol.ErrInvalidState {
+		t.Fatalf("expected INVALID_STATE when deleting base, got %v", err)
+	}
+	if len(mockExec.ExecutedLogs) != 0 {
+		t.Fatalf("executor must not run for rejected delete, got %v", mockExec.ExecutedLogs)
+	}
+}
+
+func TestEngine_SwitchAndDeleteFailClosedWhenRealExecutionDisabled(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "base.vhdx"), []byte("vhdx"), 0644); err != nil {
+		t.Fatalf("failed to create fake base.vhdx: %v", err)
+	}
+
+	baseID := "rp_base"
+	seed := map[string]*protocol.RestorePoint{
+		"rp_base": {
+			PointID: "rp_base", Name: "Base", VHDXFile: "base.vhdx",
+			IsBase: true, IsActive: true, State: protocol.RestorePointStateReady, Depth: 0,
+		},
+		"rp_child": {
+			PointID: "rp_child", Name: "Child", VHDXFile: "diff_child.vhdx",
+			ParentID: &baseID, IsActive: false, State: protocol.RestorePointStateReady, Depth: 1,
+		},
+	}
+	data, err := json.Marshal(seed)
+	if err != nil {
+		t.Fatalf("failed to marshal seed chain: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "chain.json"), data, 0644); err != nil {
+		t.Fatalf("failed to write seed chain: %v", err)
+	}
+
+	mockExec := vhdx.NewMockExecutor()
+	cfg := vhdx.Config{
+		DryRun:               false,
+		AllowDestructive:     true,
+		RealExecutionEnabled: false,
+		VolumeGUID:           `\\?\Volume{11111111-2222-3333-4444-555555555555}\`,
+		ReserveRoot:          "EZRestore",
+		ReserveRelPath:       "EZRestore",
+		BCDEntryID:           "{current}",
+		DataDir:              tmpDir,
+	}
+	eng, err := vhdx.NewEngine(cfg, mockExec)
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
+
+	var vErr *vhdx.VHDXError
+	if _, err := eng.Switch("rp_child"); err == nil || !errors.As(err, &vErr) || vErr.Code != protocol.ErrCapabilityUnsupported {
+		t.Fatalf("expected SWITCH to be refused with CAPABILITY_UNSUPPORTED, got %v", err)
+	}
+	if _, err := eng.Delete("rp_child"); err == nil || !errors.As(err, &vErr) || vErr.Code != protocol.ErrCapabilityUnsupported {
+		t.Fatalf("expected DELETE to be refused with CAPABILITY_UNSUPPORTED, got %v", err)
+	}
+	if len(mockExec.ExecutedLogs) != 0 {
+		t.Fatalf("executor must not run while real execution is disabled, got %v", mockExec.ExecutedLogs)
 	}
 }

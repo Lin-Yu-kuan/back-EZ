@@ -1,6 +1,7 @@
 package vhdx
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,9 @@ import (
 
 var (
 	ErrMetadataNotFound = errors.New("metadata file not found")
+	// ErrLegacyArrayFormat 代表 chain.json 是舊版（AgentCore 自行寫入）的 JSON 陣列格式。
+	// 舊格式與 Engine 的 map 格式不相容，必須由呼叫端備份後重建。
+	ErrLegacyArrayFormat = errors.New("legacy array-format chain metadata")
 )
 
 // Chain manages the in-memory tree/list of RestorePoints and their parent-child relationships.
@@ -221,11 +225,33 @@ func (c *Chain) LoadFromFile(path string) error {
 		return fmt.Errorf("failed to read metadata file: %w", err)
 	}
 
+	var raw json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("failed to unmarshal metadata: %w", err)
+	}
+	if trimmed := bytes.TrimSpace(raw); len(trimmed) > 0 && trimmed[0] == '[' {
+		return ErrLegacyArrayFormat
+	}
+
 	var points map[string]*protocol.RestorePoint
 	if err := json.Unmarshal(data, &points); err != nil {
 		return fmt.Errorf("failed to unmarshal metadata: %w", err)
 	}
+	if points == nil {
+		points = make(map[string]*protocol.RestorePoint)
+	}
 
 	c.Points = points
 	return nil
+}
+
+// MarkAllBroken 把鏈上所有節點標記為 BROKEN，用於載入後 Validate 失敗的情況。
+// 呼叫端負責後續持久化。
+func (c *Chain) MarkAllBroken() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, p := range c.Points {
+		p.State = protocol.RestorePointStateBroken
+	}
 }

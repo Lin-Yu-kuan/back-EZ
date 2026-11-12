@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +30,9 @@ type AgentConfig struct {
 }
 
 // AgentCore encapsulates the Agent service business logic, IPC delegate and Hub connection.
+//
+// 本機還原點的唯一狀態來源是 vhdx.Engine：AgentCore 不自行保存、也不自行寫入
+// chain.json（舊版同時用陣列格式寫入，造成 Engine 永遠載入失敗）。
 type AgentCore struct {
 	cfg        AgentConfig
 	configPath string
@@ -41,8 +45,6 @@ type AgentCore struct {
 	logger    *OperationLogger
 	status    protocol.ClientStatus
 	peReady   bool
-	activePID *string
-	points    []protocol.RestorePoint
 }
 
 // LoadOrCreateConfig loads client configuration or initializes a new permanent client_id.
@@ -81,78 +83,24 @@ func LoadOrCreateConfig(reserveRoot string) (*AgentConfig, string, error) {
 	return &cfg, configPath, nil
 }
 
-func (a *AgentCore) persistPointsLocked() {
-	if a.cfg.ReserveRoot == "" {
-		return
-	}
-	_ = os.MkdirAll(a.cfg.ReserveRoot, 0755)
-	chainPath := filepath.Join(a.cfg.ReserveRoot, "chain.json")
-	data, err := json.MarshalIndent(a.points, "", "  ")
-	if err == nil {
-		_ = os.WriteFile(chainPath, data, 0644)
-	}
-}
-
 func NewAgentCore(cfg AgentConfig, configPath string, initialPassword string) (*AgentCore, error) {
-	// Try loading existing restore points from chain.json on disk
-	chainPath := filepath.Join(cfg.ReserveRoot, "chain.json")
-	var initialPoints []protocol.RestorePoint
-	var basePID string
-
-	if data, err := os.ReadFile(chainPath); err == nil {
-		_ = json.Unmarshal(data, &initialPoints)
-	}
-
-	if len(initialPoints) == 0 {
-		initialPoints = []protocol.RestorePoint{
-			{
-				PointID:     "rp_base",
-				Name:        "Base System",
-				Description: "Original Clean Base Image",
-				VHDXFile:    "base.vhdx",
-				Depth:       0,
-				SizeBytes:   32212254720,
-				IsBase:      true,
-				IsActive:    true,
-				State:       protocol.RestorePointStateReady,
-				CreatedBy:   protocol.CreatedBySystem,
-				CreatedAt:   time.Now().UTC().Format(time.RFC3339),
-			},
-		}
-		basePID = "rp_base"
-	} else {
-		for _, p := range initialPoints {
-			if p.IsActive {
-				basePID = p.PointID
-				break
-			}
-		}
-		if basePID == "" && len(initialPoints) > 0 {
-			basePID = initialPoints[0].PointID
-		}
-	}
-
 	core := &AgentCore{
 		cfg:        cfg,
 		configPath: configPath,
 		status:     protocol.ClientStatusOnlineWindows,
-		peReady:    true,
-		points:     initialPoints,
 	}
-	if basePID != "" {
-		core.activePID = &basePID
-	}
-
-	// Persist initially so chain.json always exists on disk
-	core.persistPointsLocked()
 
 	peCfg := vhdx.PEBootConfig{
 		DryRun:           true,
+		AllowDestructive: false,
 		ReserveRoot:      cfg.ReserveRoot,
 		PhysicalDiskRoot: cfg.ReserveRoot,
 	}
 	core.peBoot = vhdx.NewPEBootManager(peCfg, nil)
 	core.capturer = capture.NewCapturer(nil)
+	if core.peBoot != nil {
+		core.peReady, _ = core.peBoot.CheckPEReady()
+	}
 
 	srv, err := ipc.NewServer(core, initialPassword)
 	if err != nil {
@@ -167,6 +115,12 @@ func (a *AgentCore) SetEngine(e *vhdx.Engine) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.engine = e
+}
+
+func (a *AgentCore) Engine() *vhdx.Engine {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.engine
 }
 
 func (a *AgentCore) SetLogger(l *OperationLogger) {
@@ -216,6 +170,7 @@ func (a *AgentCore) GetAgentInfo() (any, error) {
 		"agent_version": "0.1.0",
 		"os_edition":    "Windows 11 Education",
 		"pe_ready":      a.peReady,
+		"engine_ready":  a.engine != nil,
 		"status":        a.status,
 	}, nil
 }
@@ -224,76 +179,85 @@ func (a *AgentCore) GetStatus() (any, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
+	var activePointID any
+	if a.engine != nil {
+		if p := a.engine.GetActive(); p != nil {
+			activePointID = p.PointID
+		}
+	}
+
+	engineWarning := ""
+	if a.engine != nil {
+		engineWarning = a.engine.LoadWarning()
+	}
+
 	return map[string]any{
 		"status":                 a.status,
-		"active_point_id":        a.activePID,
+		"active_point_id":        activePointID,
 		"auto_restore_on_reboot": a.cfg.AutoRestore,
+		"engine_ready":           a.engine != nil,
+		"engine_warning":         engineWarning,
+		"dry_run":                a.engine != nil && a.engine.DryRun(),
+		"pending_reboot":         false,
 	}, nil
+}
+
+// deleteModeNote 讓刪除日誌也能區分預覽與真實執行。
+func deleteModeNote(engine *vhdx.Engine) string {
+	if engine != nil && engine.DryRun() {
+		return "（預覽模式：未刪除實體檔案）"
+	}
+	return ""
 }
 
 func (a *AgentCore) ListRestorePoints() ([]protocol.RestorePoint, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
-	return a.points, nil
+	if a.engine == nil {
+		return []protocol.RestorePoint{}, nil
+	}
+	return a.engine.List(), nil
 }
 
 func (a *AgentCore) CreateRestorePoint(name, desc string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if len(a.points) >= 5 {
-		if a.logger != nil {
-			a.logger.Log("CREATE", name, "FAILED", "差分鏈深度已達上限 (最多 5 個)")
-		}
-		return errors.New(protocol.ErrRestorePointLimit)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		a.logLocked("CREATE", "(未命名)", "FAILED", "還原點名稱不可為空")
+		return errors.New(protocol.ErrInvalidArgument)
+	}
+	if a.engine == nil {
+		a.logLocked("CREATE", name, "FAILED", "VHDX 引擎不可用（尚未完成 VHDX 原生開機建置）")
+		return errors.New(protocol.ErrCapabilityUnsupported)
 	}
 
-	pid := fmt.Sprintf("rp_%d", time.Now().Unix())
-	newRP := protocol.RestorePoint{
-		PointID:     pid,
+	point, plan, err := a.engine.Create(vhdx.CreateRequest{
 		Name:        name,
 		Description: desc,
-		VHDXFile:    pid + ".vhdx",
-		ParentID:    a.activePID,
-		Depth:       len(a.points),
-		SizeBytes:   0,
-		IsBase:      false,
-		IsActive:    true,
-		State:       protocol.RestorePointStateReady,
 		CreatedBy:   protocol.CreatedByAdminLocal,
-		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		a.logLocked("CREATE", name, "FAILED", err.Error())
+		return err
 	}
 
-	if a.engine != nil {
-		_, plan, err := a.engine.Create(vhdx.CreateRequest{
-			PointID:     pid,
-			Name:        name,
-			Description: desc,
-			ParentID:    a.activePID,
-			CreatedBy:   protocol.CreatedByAdminLocal,
-		})
-		if err != nil {
-			if a.logger != nil {
-				a.logger.Log("CREATE", name, "FAILED", fmt.Sprintf("底層建立失敗: %v", err))
-			}
-			return err
-		}
-		if a.logger != nil {
-			a.logger.Log("CREATE", name, "SUCCESS", fmt.Sprintf("成功建立差分硬碟與開機項 (共 %d 個步驟)", len(plan.Steps)))
-		}
-	} else if a.logger != nil {
-		a.logger.Log("CREATE", name, "SUCCESS", "成功建立還原點")
+	steps := 0
+	if plan != nil {
+		steps = len(plan.Steps)
 	}
-
-	for i := range a.points {
-		a.points[i].IsActive = false
+	modeNote := ""
+	if a.engine.DryRun() {
+		modeNote = "（預覽模式：僅產生執行計畫，未修改磁碟/BCD）"
 	}
-	a.points = append(a.points, newRP)
-	a.activePID = &pid
-	a.persistPointsLocked()
+	a.logLocked("CREATE", fmt.Sprintf("%s (%s)", point.Name, point.PointID), "SUCCESS",
+		fmt.Sprintf("已建立差分還原點（depth=%d，共 %d 個執行步驟，需重新開機才生效）%s", point.Depth, steps, modeNote))
 
-	a.ipcServer.BroadcastEvent("restore_points_updated", a.points)
+	if a.ipcServer != nil {
+		a.ipcServer.BroadcastEvent("restore_points_updated", a.engine.List())
+	}
 	return nil
 }
 
@@ -301,52 +265,37 @@ func (a *AgentCore) SwitchRestorePoint(pointID string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	found := false
-	var targetName string
-	for i := range a.points {
-		if a.points[i].PointID == pointID {
-			targetName = a.points[i].Name
-			found = true
-			break
-		}
+	if a.engine == nil {
+		a.logLocked("SWITCH", pointID, "FAILED", "VHDX 引擎不可用（尚未完成 VHDX 原生開機建置）")
+		return errors.New(protocol.ErrCapabilityUnsupported)
 	}
-	if !found {
-		if a.logger != nil {
-			a.logger.Log("SWITCH", pointID, "FAILED", "找不到指定的還原點")
-		}
+
+	target := a.engine.Get(pointID)
+	if target == nil {
+		a.logLocked("SWITCH", pointID, "FAILED", "找不到指定的還原點")
 		return errors.New(protocol.ErrNotFound)
 	}
 
-	if a.engine != nil {
-		plan, err := a.engine.Switch(pointID)
-		if err != nil {
-			if a.logger != nil {
-				a.logger.Log("SWITCH", fmt.Sprintf("%s (%s)", targetName, pointID), "FAILED", fmt.Sprintf("BCD 開機項切換失敗: %v", err))
-			}
-			return err
-		}
-		backupPath := ""
-		if plan != nil {
-			backupPath = plan.BackupBCDPath
-		}
-		if a.logger != nil {
-			a.logger.Log("SWITCH", fmt.Sprintf("%s (%s)", targetName, pointID), "SUCCESS", fmt.Sprintf("已成功更新 BCD 開機指標至目標磁碟 (BCD 備份於: %s)", backupPath))
-		}
-	} else if a.logger != nil {
-		a.logger.Log("SWITCH", fmt.Sprintf("%s (%s)", targetName, pointID), "SUCCESS", "已切換開機指標")
+	plan, err := a.engine.Switch(pointID)
+	if err != nil {
+		a.logLocked("SWITCH", fmt.Sprintf("%s (%s)", target.Name, pointID), "FAILED", err.Error())
+		return err
 	}
 
-	for i := range a.points {
-		if a.points[i].PointID == pointID {
-			a.points[i].IsActive = true
-		} else {
-			a.points[i].IsActive = false
-		}
+	backupPath := ""
+	if plan != nil {
+		backupPath = plan.BackupBCDPath
 	}
-	a.activePID = &pointID
-	a.persistPointsLocked()
+	modeNote := ""
+	if a.engine.DryRun() {
+		modeNote = "（預覽模式：未修改 BCD）"
+	}
+	a.logLocked("SWITCH", fmt.Sprintf("%s (%s)", target.Name, pointID), "SUCCESS",
+		fmt.Sprintf("已設定下次開機目標；請重新開機後生效（BCD 備份：%s）%s", backupPath, modeNote))
 
-	a.ipcServer.BroadcastEvent("restore_points_updated", a.points)
+	if a.ipcServer != nil {
+		a.ipcServer.BroadcastEvent("restore_points_updated", a.engine.List())
+	}
 	return nil
 }
 
@@ -354,90 +303,26 @@ func (a *AgentCore) DeleteRestorePoint(pointID string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if a.activePID != nil && *a.activePID == pointID {
-		if a.logger != nil {
-			a.logger.Log("DELETE", pointID, "FAILED", "無法刪除目前使用中的還原點")
-		}
-		return errors.New(protocol.ErrInvalidState)
+	if a.engine == nil {
+		a.logLocked("DELETE", pointID, "FAILED", "VHDX 引擎不可用（尚未完成 VHDX 原生開機建置）")
+		return errors.New(protocol.ErrCapabilityUnsupported)
 	}
 
-	if a.engine != nil {
-		_, err := a.engine.Delete(pointID)
-		if err != nil {
-			if a.logger != nil {
-				a.logger.Log("DELETE", pointID, "FAILED", fmt.Sprintf("底層刪除失敗: %v", err))
-			}
-			return err
-		}
-	}
-
-	var updated []protocol.RestorePoint
-	found := false
 	var targetName string
-	for _, p := range a.points {
-		if p.PointID == pointID {
-			if p.IsBase {
-				if a.logger != nil {
-					a.logger.Log("DELETE", pointID, "FAILED", "禁止刪除 Base 基準節點")
-				}
-				return errors.New(protocol.ErrInvalidState)
-			}
-			targetName = p.Name
-			found = true
-			continue
-		}
-		updated = append(updated, p)
-	}
-	if !found {
-		if a.logger != nil {
-			a.logger.Log("DELETE", pointID, "FAILED", "找不到指定的還原點")
-		}
-		return errors.New(protocol.ErrNotFound)
+	if p := a.engine.Get(pointID); p != nil {
+		targetName = p.Name
 	}
 
-	a.points = updated
-	a.persistPointsLocked()
-
-	if a.logger != nil {
-		a.logger.Log("DELETE", fmt.Sprintf("%s (%s)", targetName, pointID), "SUCCESS", "已成功刪除還原點及其差分檔案")
+	if _, err := a.engine.Delete(pointID); err != nil {
+		a.logLocked("DELETE", fmt.Sprintf("%s (%s)", targetName, pointID), "FAILED", err.Error())
+		return err
 	}
 
-	a.ipcServer.BroadcastEvent("restore_points_updated", a.points)
-	return nil
-}
+	a.logLocked("DELETE", fmt.Sprintf("%s (%s)", targetName, pointID), "SUCCESS", "已刪除還原點及其差分檔案"+deleteModeNote(a.engine))
 
-func (a *AgentCore) OverwriteRestorePoint(pointID string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	found := false
-	var targetName string
-	for i := range a.points {
-		if a.points[i].PointID == pointID {
-			targetName = a.points[i].Name
-			a.points[i].CreatedAt = time.Now().UTC().Format(time.RFC3339)
-			a.points[i].State = protocol.RestorePointStateReady
-			a.points[i].IsActive = true
-			found = true
-		} else {
-			a.points[i].IsActive = false
-		}
+	if a.ipcServer != nil {
+		a.ipcServer.BroadcastEvent("restore_points_updated", a.engine.List())
 	}
-	if !found {
-		if a.logger != nil {
-			a.logger.Log("OVERWRITE", pointID, "FAILED", "找不到指定的還原點")
-		}
-		return errors.New(protocol.ErrNotFound)
-	}
-
-	a.activePID = &pointID
-	a.persistPointsLocked()
-
-	if a.logger != nil {
-		a.logger.Log("OVERWRITE", fmt.Sprintf("%s (%s)", targetName, pointID), "SUCCESS", "已成功將當前系統狀態覆蓋更新至目標還原點")
-	}
-
-	a.ipcServer.BroadcastEvent("restore_points_updated", a.points)
 	return nil
 }
 
@@ -464,8 +349,16 @@ func (a *AgentCore) SetHubEndpoint(hubURL, enrollToken string) error {
 func (a *AgentCore) UninstallService() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
 	a.status = protocol.ClientStatusOffline
 	return nil
+}
+
+// logLocked 只在呼叫端已持有 a.mu 時使用，避免與 SetLogger 競爭。
+func (a *AgentCore) logLocked(action, target, status, details string) {
+	if a.logger != nil {
+		a.logger.Log(action, target, status, details)
+	}
 }
 
 // --- Command Execution & Expiration Framework ---

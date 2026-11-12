@@ -141,4 +141,3 @@ func TestCoordinator_DryRunFlowAndVerification(t *testing.T) {
 		t.Fatalf("expected error code IMAGE_VERIFY_FAILED, got %+v", failResult)
 	}
 }
-

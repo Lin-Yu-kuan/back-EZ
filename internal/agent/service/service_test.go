@@ -8,10 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/owner/back-ez/internal/protocol"
+	"github.com/owner/back-ez/internal/workers/vhdx"
 )
 
 func setupTestAgentCore(t *testing.T) (*AgentCore, string, func()) {
@@ -32,6 +34,61 @@ func setupTestAgentCore(t *testing.T) (*AgentCore, string, func()) {
 		_ = os.RemoveAll(dir)
 		t.Fatalf("failed to initialize agent core: %v", err)
 	}
+
+	cleanup := func() {
+		_ = os.RemoveAll(dir)
+	}
+	return core, dir, cleanup
+}
+
+func newTestEngine(t *testing.T, dir string) *vhdx.Engine {
+	t.Helper()
+
+	eng, err := vhdx.NewEngine(vhdx.Config{
+		DryRun:         true,
+		VolumeGUID:     `\\?\Volume{11111111-2222-3333-4444-555555555555}\`,
+		ReserveRoot:    "EZRestore",
+		ReserveRelPath: "EZRestore",
+		DataDir:        dir,
+	}, vhdx.NewDryRunExecutor())
+	if err != nil {
+		t.Fatalf("failed to create engine: %v", err)
+	}
+	return eng
+}
+
+// setupTestAgentCoreWithEngine 建立「已接上 VHDX 引擎」的 AgentCore。
+// 舊版測試只測沒有 engine 的 core，因此完全掩蓋了 chain.json 雙寫導致 engine 永遠 nil 的問題。
+func setupTestAgentCoreWithEngine(t *testing.T) (*AgentCore, string, func()) {
+	t.Helper()
+
+	dir, err := os.MkdirTemp("", "backez-agent-engine-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "base.vhdx"), []byte("vhdx"), 0644); err != nil {
+		_ = os.RemoveAll(dir)
+		t.Fatalf("failed to create fake base.vhdx: %v", err)
+	}
+
+	cfg, cfgPath, err := LoadOrCreateConfig(dir)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		t.Fatalf("failed to load/create config: %v", err)
+	}
+
+	core, err := NewAgentCore(*cfg, cfgPath, "localpassword")
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		t.Fatalf("failed to initialize agent core: %v", err)
+	}
+
+	eng := newTestEngine(t, dir)
+	if _, err := eng.EnsureBase("", ""); err != nil {
+		_ = os.RemoveAll(dir)
+		t.Fatalf("failed to initialize base point: %v", err)
+	}
+	core.SetEngine(eng)
 
 	cleanup := func() {
 		_ = os.RemoveAll(dir)
@@ -174,7 +231,7 @@ func TestAgentCore_IPCMethodsAndRateLimiting(t *testing.T) {
 }
 
 func TestAgentCore_CommandExpirationAndPasswordSync(t *testing.T) {
-	core, _, cleanup := setupTestAgentCore(t)
+	core, _, cleanup := setupTestAgentCoreWithEngine(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -326,20 +383,10 @@ func TestAgentCore_CmdPrepareDeploy(t *testing.T) {
 }
 
 func TestAgentCore_RestorePointsPersistence(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfg := AgentConfig{
-		ClientID:    "cli_persist_test_1234",
-		ReserveRoot: tmpDir,
-	}
-	cfgPath := filepath.Join(tmpDir, "agent.json")
+	core1, dir, cleanup := setupTestAgentCoreWithEngine(t)
+	defer cleanup()
 
-	// 1. Initial agent core
-	core1, err := NewAgentCore(cfg, cfgPath, "secret")
-	if err != nil {
-		t.Fatalf("failed to create agent core: %v", err)
-	}
-
-	// 2. Create a new restore point
+	// 1. Create a new restore point through the engine
 	if err := core1.CreateRestorePoint("使用者重要備份", "軟體安裝後快照"); err != nil {
 		t.Fatalf("CreateRestorePoint failed: %v", err)
 	}
@@ -349,18 +396,82 @@ func TestAgentCore_RestorePointsPersistence(t *testing.T) {
 		t.Fatalf("expected 2 restore points, got %d", len(pts1))
 	}
 
-	// 3. Simulate process restart by creating a new AgentCore from the same reserve root
-	core2, err := NewAgentCore(cfg, cfgPath, "secret")
+	// chain.json 必須是 map 格式，不得回到舊版陣列格式（那會讓 Engine 永遠載入失敗）
+	data, err := os.ReadFile(filepath.Join(dir, "chain.json"))
+	if err != nil {
+		t.Fatalf("chain.json not found: %v", err)
+	}
+	if strings.HasPrefix(strings.TrimSpace(string(data)), "[") {
+		t.Fatalf("chain.json must be an object map, got array: %s", string(data))
+	}
+
+	// 2. Simulate process restart by creating a new AgentCore + Engine from the same reserve root
+	cfg, cfgPath, err := LoadOrCreateConfig(dir)
+	if err != nil {
+		t.Fatalf("failed to reload config: %v", err)
+	}
+	core2, err := NewAgentCore(*cfg, cfgPath, "localpassword")
 	if err != nil {
 		t.Fatalf("failed to reload agent core: %v", err)
 	}
+	eng2 := newTestEngine(t, dir)
+	if _, err := eng2.EnsureBase("", ""); err != nil {
+		t.Fatalf("failed to ensure base after restart: %v", err)
+	}
+	core2.SetEngine(eng2)
 
 	pts2, _ := core2.ListRestorePoints()
 	if len(pts2) != 2 {
 		t.Fatalf("expected 2 restore points after restart, got %d (points vanished!)", len(pts2))
 	}
 
-	if pts2[1].Name != "使用者重要備份" {
-		t.Errorf("expected restore point name '使用者重要備份', got %s", pts2[1].Name)
+	found := false
+	for _, p := range pts2 {
+		if p.Name == "使用者重要備份" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected restore point name to survive restart, got %+v", pts2)
+	}
+}
+
+func TestAgentCore_OperationsFailWithoutEngine(t *testing.T) {
+	core, _, cleanup := setupTestAgentCore(t)
+	defer cleanup()
+
+	if err := core.CreateRestorePoint("測試", "沒有引擎"); err == nil || err.Error() != protocol.ErrCapabilityUnsupported {
+		t.Fatalf("expected CAPABILITY_UNSUPPORTED for create, got %v", err)
+	}
+	if err := core.SwitchRestorePoint("rp_base"); err == nil || err.Error() != protocol.ErrCapabilityUnsupported {
+		t.Fatalf("expected CAPABILITY_UNSUPPORTED for switch, got %v", err)
+	}
+	if err := core.DeleteRestorePoint("rp_base"); err == nil || err.Error() != protocol.ErrCapabilityUnsupported {
+		t.Fatalf("expected CAPABILITY_UNSUPPORTED for delete, got %v", err)
+	}
+
+	pts, err := core.ListRestorePoints()
+	if err != nil || len(pts) != 0 {
+		t.Fatalf("expected empty list without engine, got %v / %v", pts, err)
+	}
+}
+
+func TestAgentCore_NoFakeSuccessWithoutEngine(t *testing.T) {
+	core, dir, cleanup := setupTestAgentCore(t)
+	defer cleanup()
+
+	logger := NewOperationLogger(filepath.Join(dir, "operation.log"))
+	core.SetLogger(logger)
+
+	_ = core.CreateRestorePoint("測試", "")
+
+	entries := logger.GetEntries()
+	if len(entries) == 0 {
+		t.Fatalf("expected a FAILED log entry when engine is unavailable")
+	}
+	for _, e := range entries {
+		if e.Action == "CREATE" && e.Status == "SUCCESS" {
+			t.Fatalf("must not log SUCCESS when engine is unavailable: %+v", e)
+		}
 	}
 }

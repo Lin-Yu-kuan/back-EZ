@@ -102,4 +102,3 @@ func TestCapturer_CaptureDHCP(t *testing.T) {
 		t.Fatalf("expected ErrChecksumMismatch, got %v", err)
 	}
 }
-

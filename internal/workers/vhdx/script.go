@@ -54,34 +54,65 @@ func (p *ExecutionPlan) BatchScript() string {
 }
 
 // resolvePaths returns:
-// 1. diskpartPath: e.g. `\\?\Volume{...}\EZRestore\diff.vhdx` or `C:\EZRestore\diff.vhdx`
-// 2. bcdPath: e.g. `vhd=[\\?\Volume{...}]\EZRestore\diff.vhdx` or `vhd=[C:]\EZRestore\diff.vhdx`
-func (e *Engine) resolvePaths(vhdxFile string) (diskpartPath string, bcdPath string) {
-	relFile := strings.TrimPrefix(filepath.Clean(vhdxFile), "\\")
-	relFile = strings.TrimPrefix(relFile, "/")
-
-	if e.cfg.VolumeGUID != "" {
-		vol := strings.TrimSuffix(e.cfg.VolumeGUID, "\\")
-		vol = strings.TrimSuffix(vol, "/")
-
-		diskpartPath = fmt.Sprintf("%s\\%s\\%s", vol, e.cfg.ReserveRoot, relFile)
-		bcdPath = fmt.Sprintf("vhd=[%s]\\%s\\%s", vol, e.cfg.ReserveRoot, relFile)
-	} else {
-		// Fallback for mock/test without volume GUID
-		diskpartPath = fmt.Sprintf("C:\\%s\\%s", e.cfg.ReserveRoot, relFile)
-		bcdPath = fmt.Sprintf("vhd=[C:]\\%s\\%s", e.cfg.ReserveRoot, relFile)
+// 1. diskpartPath: e.g. `\\?\Volume{...}\EZRestore\diff.vhdx`
+// 2. bcdPath: e.g. `vhd=[\\?\Volume{...}]\EZRestore\diff.vhdx`
+//
+// 保留區一律以磁碟區 GUID 定位：磁碟機代號在開機階段（尤其是 PE）不可靠。
+// 沒有 VolumeGUID 時直接回錯誤，讓呼叫端 fail-closed，不得退化成 `C:\<絕對路徑>` 這種錯誤字串。
+func (e *Engine) resolvePaths(vhdxFile string) (diskpartPath string, bcdPath string, err error) {
+	vol := strings.TrimSpace(e.cfg.VolumeGUID)
+	vol = strings.TrimSuffix(strings.TrimSuffix(vol, "\\"), "/")
+	if vol == "" {
+		return "", "", &VHDXError{
+			Code:    protocol.ErrInvalidState,
+			Message: "保留區磁碟區（VolumeGUID）未設定，無法產生 diskpart/BCD 路徑",
+		}
 	}
-	return diskpartPath, bcdPath
+
+	rel := strings.TrimSpace(e.cfg.ReserveRelPath)
+	if rel == "" {
+		if filepath.IsAbs(e.cfg.ReserveRoot) {
+			return "", "", &VHDXError{
+				Code:    protocol.ErrInvalidState,
+				Message: "ReserveRoot 為絕對路徑但未設定 ReserveRelPath，無法對應磁碟區相對路徑",
+			}
+		}
+		rel = e.cfg.ReserveRoot
+	}
+	rel = strings.Trim(strings.ReplaceAll(rel, "/", "\\"), "\\")
+
+	file := strings.Trim(strings.ReplaceAll(vhdxFile, "/", "\\"), "\\")
+	if file == "" {
+		return "", "", &VHDXError{
+			Code:    protocol.ErrInvalidArgument,
+			Message: "VHDX 檔名不可為空",
+		}
+	}
+	if rel != "" {
+		file = rel + "\\" + file
+	}
+
+	return vol + "\\" + file, "vhd=[" + vol + "]\\" + file, nil
 }
 
-func (e *Engine) generateCreatePlan(parent, child *protocol.RestorePoint) *ExecutionPlan {
-	parentDiskpart, _ := e.resolvePaths(parent.VHDXFile)
-	childDiskpart, childBCD := e.resolvePaths(child.VHDXFile)
+// backupPath 回傳保留區內的 BCD 備份檔實體路徑（與 VHDX 使用相同的磁碟區定位方式）。
+func (e *Engine) backupPath(name string) (string, error) {
+	phys, _, err := e.resolvePaths(name)
+	return phys, err
+}
 
-	backupBCDPath := fmt.Sprintf("C:\\%s\\bcd_backup_%s.bcd", e.cfg.ReserveRoot, child.PointID)
-	if e.cfg.VolumeGUID != "" {
-		vol := strings.TrimSuffix(e.cfg.VolumeGUID, "\\")
-		backupBCDPath = fmt.Sprintf("%s\\%s\\bcd_backup_%s.bcd", vol, e.cfg.ReserveRoot, child.PointID)
+func (e *Engine) generateCreatePlan(parent, child *protocol.RestorePoint) (*ExecutionPlan, error) {
+	parentDiskpart, _, err := e.resolvePaths(parent.VHDXFile)
+	if err != nil {
+		return nil, err
+	}
+	childDiskpart, childBCD, err := e.resolvePaths(child.VHDXFile)
+	if err != nil {
+		return nil, err
+	}
+	backupBCDPath, err := e.backupPath("bcd_backup_" + child.PointID + ".bcd")
+	if err != nil {
+		return nil, err
 	}
 
 	diskpartScript := fmt.Sprintf("create vdisk file=\"%s\" parent=\"%s\"", childDiskpart, parentDiskpart)
@@ -120,16 +151,17 @@ func (e *Engine) generateCreatePlan(parent, child *protocol.RestorePoint) *Execu
 		DiskpartScript: diskpartScript,
 		Steps:          steps,
 		GeneratedAt:    child.CreatedAt,
-	}
+	}, nil
 }
 
-func (e *Engine) generateSwitchPlan(target *protocol.RestorePoint) *ExecutionPlan {
-	_, targetBCD := e.resolvePaths(target.VHDXFile)
-
-	backupBCDPath := fmt.Sprintf("C:\\%s\\bcd_backup_switch_%s.bcd", e.cfg.ReserveRoot, target.PointID)
-	if e.cfg.VolumeGUID != "" {
-		vol := strings.TrimSuffix(e.cfg.VolumeGUID, "\\")
-		backupBCDPath = fmt.Sprintf("%s\\%s\\bcd_backup_switch_%s.bcd", vol, e.cfg.ReserveRoot, target.PointID)
+func (e *Engine) generateSwitchPlan(target *protocol.RestorePoint) (*ExecutionPlan, error) {
+	_, targetBCD, err := e.resolvePaths(target.VHDXFile)
+	if err != nil {
+		return nil, err
+	}
+	backupBCDPath, err := e.backupPath("bcd_backup_switch_" + target.PointID + ".bcd")
+	if err != nil {
+		return nil, err
 	}
 
 	steps := []ExecutionStep{
@@ -159,11 +191,14 @@ func (e *Engine) generateSwitchPlan(target *protocol.RestorePoint) *ExecutionPla
 		BackupBCDPath: backupBCDPath,
 		Steps:         steps,
 		GeneratedAt:   target.CreatedAt,
-	}
+	}, nil
 }
 
-func (e *Engine) generateDeletePlan(target *protocol.RestorePoint) *ExecutionPlan {
-	targetDiskpart, _ := e.resolvePaths(target.VHDXFile)
+func (e *Engine) generateDeletePlan(target *protocol.RestorePoint) (*ExecutionPlan, error) {
+	targetDiskpart, _, err := e.resolvePaths(target.VHDXFile)
+	if err != nil {
+		return nil, err
+	}
 
 	steps := []ExecutionStep{
 		{
@@ -179,5 +214,5 @@ func (e *Engine) generateDeletePlan(target *protocol.RestorePoint) *ExecutionPla
 		TargetPointID: target.PointID,
 		Steps:         steps,
 		GeneratedAt:   target.CreatedAt,
-	}
+	}, nil
 }

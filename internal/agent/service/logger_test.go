@@ -28,4 +28,3 @@ func TestOperationLogger(t *testing.T) {
 		t.Fatalf("expected log file on disk to be written, err: %v", err)
 	}
 }
-

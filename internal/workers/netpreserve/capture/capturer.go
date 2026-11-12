@@ -209,4 +209,3 @@ func VerifySnapshot(reserveRoot string) (*protocol.NetworkIdentity, error) {
 
 	return &identity, nil
 }
-

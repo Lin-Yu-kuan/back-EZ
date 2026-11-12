@@ -39,4 +39,3 @@ func ParseStatLine(line string) (percent float64, speedMbps float64, ok bool) {
 
 	return 0, 0, false
 }
-
