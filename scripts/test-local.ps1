@@ -33,6 +33,7 @@ Set-Location -LiteralPath $repoRoot
 $packages = @(
     './internal/agent/...'
     './internal/workers/vhdx/...'
+    './internal/workers/sysrestore/...'
     './internal/workers/homesku/...'
     './internal/protocol/...'
     './cmd/gui/...'

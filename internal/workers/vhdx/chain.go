@@ -84,6 +84,16 @@ func (c *Chain) SetActive(pointID string) {
 	}
 }
 
+// SetState updates the lifecycle state of a single point.
+func (c *Chain) SetState(pointID string, state protocol.RestorePointState) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if p, ok := c.Points[pointID]; ok {
+		p.State = state
+	}
+}
+
 // GetChildren returns all points whose ParentID equals pointID.
 func (c *Chain) GetChildren(pointID string) []*protocol.RestorePoint {
 	c.mu.RLock()

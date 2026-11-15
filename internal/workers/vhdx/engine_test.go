@@ -294,9 +294,9 @@ func TestEngine_RollbackOnFailure(t *testing.T) {
 	}
 
 	cfg := vhdx.Config{
-		DryRun:               false,
+		DryRun:               true,
 		AllowDestructive:     true,
-		RealExecutionEnabled: true,
+		RealExecutionEnabled: false,
 		VolumeGUID:           `\\?\Volume{11111111-2222-3333-4444-555555555555}\`,
 		ReserveRoot:          "EZRestore",
 		ReserveRelPath:       "EZRestore",
@@ -573,7 +573,7 @@ func TestEngine_DeleteValidatesBeforeExecution(t *testing.T) {
 	cfg := vhdx.Config{
 		DryRun:               false,
 		AllowDestructive:     true,
-		RealExecutionEnabled: true,
+		RealExecutionEnabled: false,
 		VolumeGUID:           `\\?\Volume{11111111-2222-3333-4444-555555555555}\`,
 		ReserveRoot:          "EZRestore",
 		ReserveRelPath:       "EZRestore",

@@ -14,6 +14,7 @@ import (
 
 	"github.com/owner/back-ez/internal/agent/service"
 	"github.com/owner/back-ez/internal/protocol"
+	"github.com/owner/back-ez/internal/workers/sysrestore"
 	"github.com/owner/back-ez/internal/workers/vhdx"
 )
 
@@ -64,7 +65,22 @@ type testPanel struct {
 	token string
 }
 
-func newTestPanel(t *testing.T, caps vhdx.Capabilities) *testPanel {
+// panelOption customizes the fake HTTP surface (e.g. the System Restore module).
+type panelOption func(*guiDeps)
+
+func withSysRestore(service sysrestore.Service) panelOption {
+	return func(deps *guiDeps) { deps.sysrestore = service }
+}
+
+func withDryRun(dryRun bool) panelOption {
+	return func(deps *guiDeps) { deps.dryRun = dryRun }
+}
+
+func withShutdown(fn func()) panelOption {
+	return func(deps *guiDeps) { deps.shutdown = fn }
+}
+
+func newTestPanel(t *testing.T, caps vhdx.Capabilities, opts ...panelOption) *testPanel {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -109,6 +125,9 @@ func newTestPanel(t *testing.T, caps vhdx.Capabilities) *testPanel {
 		reserveRoot:        dir,
 		port:               28888,
 		engine:             engine,
+	}
+	for _, opt := range opts {
+		opt(deps)
 	}
 
 	return &testPanel{mux: newMux(deps), token: testToken}
@@ -487,5 +506,307 @@ func TestOriginAllowed(t *testing.T) {
 		if got := originAllowed(req); got != tt.want {
 			t.Errorf("originAllowed(Origin=%q) = %t, want %t", tt.origin, got, tt.want)
 		}
+	}
+}
+
+// fakeSysRestore is an in-memory sysrestore.Service for HTTP tests.
+type fakeSysRestore struct {
+	status     sysrestore.Status
+	points     []sysrestore.Point
+	createErr  error
+	restoreErr error
+	enableErr  error
+
+	created  []string
+	restored []int
+	enabled  []string
+}
+
+func (f *fakeSysRestore) Status(context.Context) sysrestore.Status {
+	return f.status
+}
+
+func (f *fakeSysRestore) List(context.Context) ([]sysrestore.Point, error) {
+	return f.points, nil
+}
+
+func (f *fakeSysRestore) Create(_ context.Context, description string) (sysrestore.Point, error) {
+	if f.createErr != nil {
+		return sysrestore.Point{}, f.createErr
+	}
+	f.created = append(f.created, description)
+	return sysrestore.Point{Sequence: 42, Description: description, CreatedAt: "2026-11-12T05:00:00Z"}, nil
+}
+
+func (f *fakeSysRestore) Restore(_ context.Context, sequence int) error {
+	if f.restoreErr != nil {
+		return f.restoreErr
+	}
+	f.restored = append(f.restored, sequence)
+	return nil
+}
+
+func (f *fakeSysRestore) Enable(_ context.Context, drive string) error {
+	if f.enableErr != nil {
+		return f.enableErr
+	}
+	f.enabled = append(f.enabled, drive)
+	return nil
+}
+
+func readySysRestoreStatus() sysrestore.Status {
+	return sysrestore.Status{
+		Supported:         true,
+		IsAdmin:           true,
+		Drive:             `C:\`,
+		ProtectionEnabled: true,
+		FreeBytes:         100 << 30,
+		ThrottleMinutes:   0,
+		PointCount:        1,
+		CanCreate:         true,
+		CanRestore:        true,
+	}
+}
+
+func TestSysRestoreStatusEndpoint(t *testing.T) {
+	fake := &fakeSysRestore{status: readySysRestoreStatus()}
+	panel := newTestPanel(t, readyCapabilities(), withSysRestore(fake))
+
+	rec := panel.request(t, http.MethodGet, "/api/sysrestore/status", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var body struct {
+		OK   bool              `json:"ok"`
+		Data sysrestore.Status `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if !body.OK || !body.Data.Supported || !body.Data.ProtectionEnabled || !body.Data.IsAdmin {
+		t.Fatalf("unexpected status payload: %+v", body)
+	}
+}
+
+func TestSysRestorePointsEndpoint(t *testing.T) {
+	fake := &fakeSysRestore{
+		status: readySysRestoreStatus(),
+		points: []sysrestore.Point{{Sequence: 5, Description: "before update", CreatedAt: "2026-11-12T04:00:00Z"}},
+	}
+	panel := newTestPanel(t, readyCapabilities(), withSysRestore(fake))
+
+	rec := panel.request(t, http.MethodGet, "/api/sysrestore/points", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var points []sysrestore.Point
+	if err := json.Unmarshal(rec.Body.Bytes(), &points); err != nil {
+		t.Fatalf("decode points: %v", err)
+	}
+	if len(points) != 1 || points[0].Sequence != 5 {
+		t.Fatalf("unexpected points: %+v", points)
+	}
+}
+
+func TestSysRestoreMutationsRequireToken(t *testing.T) {
+	fake := &fakeSysRestore{status: readySysRestoreStatus()}
+	panel := newTestPanel(t, readyCapabilities(), withSysRestore(fake))
+
+	for _, headers := range []map[string]string{nil, map[string]string{tokenHeader: "wrong-token"}} {
+		rec := panel.request(t, http.MethodPost, "/api/sysrestore/create", `{"description":"x"}`, headers)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 without a valid token, got %d", rec.Code)
+		}
+	}
+	if len(fake.created) != 0 {
+		t.Fatalf("mutations must not reach the manager without a token")
+	}
+}
+
+func TestSysRestoreMutationsRequireRealMode(t *testing.T) {
+	fake := &fakeSysRestore{status: readySysRestoreStatus()}
+	panel := newTestPanel(t, readyCapabilities(), withSysRestore(fake), withDryRun(true))
+
+	rec := panel.request(t, http.MethodPost, "/api/sysrestore/create", `{"description":"x"}`, panel.authorized())
+	decodeAPIError(t, rec, http.StatusConflict, protocol.ErrInvalidState)
+	if len(fake.created) != 0 {
+		t.Fatalf("DryRun must not create a restore point")
+	}
+}
+
+func TestSysRestoreMutationsRequireAdmin(t *testing.T) {
+	status := readySysRestoreStatus()
+	status.IsAdmin = false
+	fake := &fakeSysRestore{status: status}
+	panel := newTestPanel(t, readyCapabilities(), withSysRestore(fake))
+
+	rec := panel.request(t, http.MethodPost, "/api/sysrestore/create", `{"description":"x"}`, panel.authorized())
+	decodeAPIError(t, rec, http.StatusForbidden, protocol.ErrForbidden)
+}
+
+func TestSysRestoreCreateSuccess(t *testing.T) {
+	fake := &fakeSysRestore{status: readySysRestoreStatus()}
+	panel := newTestPanel(t, readyCapabilities(), withSysRestore(fake))
+
+	rec := panel.request(t, http.MethodPost, "/api/sysrestore/create",
+		`{"description":"安裝更新前"}`, panel.authorized())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if len(fake.created) != 1 || fake.created[0] != "安裝更新前" {
+		t.Fatalf("manager did not receive the description: %+v", fake.created)
+	}
+
+	var body struct {
+		OK   bool             `json:"ok"`
+		Data sysrestore.Point `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if !body.OK || body.Data.Sequence != 42 {
+		t.Fatalf("unexpected create response: %+v", body)
+	}
+}
+
+func TestSysRestoreRestoreRequiresConfirmation(t *testing.T) {
+	fake := &fakeSysRestore{status: readySysRestoreStatus()}
+	panel := newTestPanel(t, readyCapabilities(), withSysRestore(fake))
+
+	rec := panel.request(t, http.MethodPost, "/api/sysrestore/restore",
+		`{"sequence":5,"confirm":"yes"}`, panel.authorized())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for wrong confirmation, got %d", rec.Code)
+	}
+	if len(fake.restored) != 0 {
+		t.Fatalf("restore must not run without RESTORE confirmation")
+	}
+
+	rec = panel.request(t, http.MethodPost, "/api/sysrestore/restore",
+		`{"sequence":5,"confirm":"RESTORE"}`, panel.authorized())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for confirmed restore, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(fake.restored) != 1 || fake.restored[0] != 5 {
+		t.Fatalf("unexpected restored sequences: %+v", fake.restored)
+	}
+
+	var body struct {
+		Data struct {
+			Rebooting bool `json:"rebooting"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode restore response: %v", err)
+	}
+	if !body.Data.Rebooting {
+		t.Fatalf("restore response must flag rebooting")
+	}
+}
+
+func TestSysRestoreEnable(t *testing.T) {
+	fake := &fakeSysRestore{status: readySysRestoreStatus()}
+	panel := newTestPanel(t, readyCapabilities(), withSysRestore(fake))
+
+	rec := panel.request(t, http.MethodPost, "/api/sysrestore/enable", `{"drive":"C:\\"}`, panel.authorized())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if len(fake.enabled) != 1 || fake.enabled[0] != `C:\` {
+		t.Fatalf("unexpected enabled drives: %+v", fake.enabled)
+	}
+}
+
+func TestSysRestoreRejectsCrossOrigin(t *testing.T) {
+	fake := &fakeSysRestore{status: readySysRestoreStatus()}
+	panel := newTestPanel(t, readyCapabilities(), withSysRestore(fake))
+
+	headers := panel.authorized()
+	headers["Origin"] = "http://evil.example"
+	rec := panel.request(t, http.MethodPost, "/api/sysrestore/create", `{"description":"x"}`, headers)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for cross-origin, got %d", rec.Code)
+	}
+}
+
+func TestShutdownEndpoint(t *testing.T) {
+	done := make(chan struct{})
+	panel := newTestPanel(t, readyCapabilities(), withShutdown(func() { close(done) }))
+
+	rec := panel.request(t, http.MethodPost, "/api/system/shutdown", "", panel.authorized())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("shutdown status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("shutdown callback was not invoked")
+	}
+
+	// The endpoint must still require the per-launch token.
+	rec = panel.request(t, http.MethodPost, "/api/system/shutdown", "", nil)
+	decodeAPIError(t, rec, http.StatusForbidden, protocol.ErrForbidden)
+}
+
+func TestHealthEndpoint(t *testing.T) {
+	panel := newTestPanel(t, readyCapabilities(), withDryRun(true))
+
+	rec := panel.request(t, http.MethodGet, "/api/health", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("health status = %d", rec.Code)
+	}
+	var body struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			App    string `json:"app"`
+			DryRun bool   `json:"dry_run"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	if !body.OK || body.Data.App != "back-ez" || !body.Data.DryRun {
+		t.Fatalf("unexpected health payload: %+v", body)
+	}
+}
+
+func TestProbeInstanceDetectsBackEZ(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/health" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true,"data":{"app":"back-ez","dry_run":true}}`)
+	}))
+	defer server.Close()
+
+	addr := strings.TrimPrefix(server.URL, "http://")
+	probe := probeInstance(addr, server.URL)
+	if !probe.Exists {
+		t.Fatalf("expected an existing back-EZ instance")
+	}
+	if !probe.DryRun {
+		t.Fatalf("expected dry_run=true to be detected")
+	}
+}
+
+func TestProbeInstanceRejectsNonBackEZ(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "this is not back-ez")
+	}))
+	defer server.Close()
+
+	addr := strings.TrimPrefix(server.URL, "http://")
+	if probe := probeInstance(addr, server.URL); probe.Exists {
+		t.Fatalf("a non back-ez HTTP server must not be treated as an instance")
+	}
+}
+
+func TestProbeInstanceWhenNothingListens(t *testing.T) {
+	if probe := probeInstance("127.0.0.1:1", "http://127.0.0.1:1"); probe.Exists {
+		t.Fatalf("nothing listens on port 1")
 	}
 }

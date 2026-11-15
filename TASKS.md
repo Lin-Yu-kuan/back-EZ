@@ -71,6 +71,25 @@
 
 ---
 
+## 本機備援：Windows 內建系統還原（2026-11-12）
+
+> 與 VHDX 並存（決策 D10）；VHDX 尚未建置時，這是「現在就能用」的還原路徑。
+
+- [x] **Task R1：`internal/workers/sysrestore`**
+  - **目標**：包裝 Windows 內建系統還原（狀態／清單／建立／還原／開啟），以 PowerShell ＋ `ConvertTo-Json` 取得結構化結果；runner 可注入，測試不碰真系統。
+  - **驗收**：`go test ./internal/workers/sysrestore` 通過；非管理員、未開啟保護、建立頻率限制、逾時都 fail-closed 並回報明確原因。
+  - **驗收摘要**（2026-11-12）：狀態／清單／建立／還原／開啟與錯誤映射皆有測試；description 以環境變數傳遞，不拼字串。
+- [x] **Task R2：本機 API 與面板**
+  - **目標**：`/api/sysrestore/{status,points,enable,create,restore}`；面板新增「Windows 內建系統還原（備援）」卡；沿用 token／Origin／管理員／實際模式 gate，且**不套用** VHDX 能力檢查。
+  - **驗收**：預覽模式 409、非管理員 403、跨來源 403、還原需 `confirm=RESTORE`；HTML 無未轉義動態值。
+  - **驗收摘要**（2026-11-12）：cmd/gui 與 panel 測試通過；`go test ./...` 全綠；`scripts/test-local.ps1` 已納入新套件。
+- [~] **Task R3：實機驗收（需管理員）**
+  - **目標**：以實際模式開啟面板，開啟系統保護、建立一個還原點，並在第二台測試機實際還原一次。
+  - **驗收**：建立後可在 Windows「系統保護」或 `Get-ComputerRestorePoint` 看到；第二台測試機還原成功；這台只做建立與列表。
+  - **待辦**：需使用者以管理員執行 [`啟動.bat`](./啟動.bat) 選項 2；目前尚未執行。
+
+---
+
 ## Milestone 0：環境與工具鏈
 
 - [x] **Task 0.1：開發環境、測試機與工具鏈**

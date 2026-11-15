@@ -328,6 +328,29 @@ UI 規則：MAC 未知的機器「喚醒」按鈕停用並提示補建；WOL 廣
 
 ---
 
+## D10. Windows 內建系統還原作為本機備援
+
+- **日期**：2026-11-12（v1.0 後新增；不改寫 D1–D9 已定案內容）
+- **背景**：VHDX 秒級還原需要一次性「實體機 → VHDX 原生開機」建置（D4／SPEC §4.4），短期內無法在現有機器使用；使用者需要「現在就能還原」的低風險方案。
+
+### 決策（選項 A）
+
+1. **兩套機制並存、互不混合**：面板新增「Windows 內建系統還原（備援）」，與 VHDX 還原點各有自己的清單與 API；不得把 Windows 還原點寫進 `chain.json`，也不得把 VHDX 節點顯示在系統還原清單。
+2. **只包裝 Windows 內建功能**：`Get-ComputerRestorePoint`／`Checkpoint-Computer`／`Restore-Computer`／`Enable-ComputerRestore`；不自製還原格式、不修改 Windows 的還原機制。
+3. **權限與模式**：需要管理員權限；寫入操作另需實際模式（`--dryrun=false --i-understand-risk`）＋ `X-BackEZ-Token` ＋ `Origin` 同源檢查。預覽模式一律只顯示、不執行。
+4. **不自動開啟系統保護**：只有使用者明確按下「開啟系統保護」才呼叫 `Enable-ComputerRestore`。
+5. **不修改 `SystemRestorePointCreationFrequency`**：只讀取並顯示建立頻率限制與下次可建立時間。
+6. **還原需二次確認**：UI 與伺服器端都要求輸入 `RESTORE`；明確告知會**立即重新開機**、且**不會還原個人檔案**。
+7. **限制**：只還原系統檔／驅動／登錄／已安裝程式，不含個人檔案；非秒級；實際還原驗收先在第二台測試機執行。
+
+### 影響
+
+- 新增 `internal/workers/sysrestore`、`/api/sysrestore/*`、面板備援卡；`scripts/test-local.ps1` 納入新套件。
+- [`TASKS.md`](./TASKS.md) 新增本機備援任務；[`AGENT.md`](./AGENT.md) Scope 補充兩套機制並存。
+- VHDX B 案不受影響，仍是長期整機還原方案。
+
+---
+
 ## 決策總表（請填寫）
 
 | 編號 | 題目 | 建議 | 你的選擇 | 備註 |
@@ -341,6 +364,7 @@ UI 規則：MAC 未知的機器「喚醒」按鈕停用並提示補建；WOL 廣
 | D7 | 離線 MAC 來源 | A（三層） | **A** | 已定案 |
 | D8 | 兩套還原機制關係 | A（派送重建 base、舊鏈作廢） | **A** | 已定案 |
 | D9 | 本機優先與鏈資料單一寫入者 | A（engine 單一寫入 + fail-closed） | **A** | 已定案（2026-11-12） |
+| D10 | Windows 內建系統還原作為本機備援 | A（包裝內建功能、與 VHDX 並存） | **A** | 已定案（2026-11-12） |
 
 ## 決策完成後的回填順序（由 AI 執行）
 

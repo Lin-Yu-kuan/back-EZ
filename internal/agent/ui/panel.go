@@ -250,7 +250,15 @@ const fullPanelTemplate = `<!DOCTYPE html>
       <h1>🛡️ back-EZ 本機秒級還原控制台</h1>
       <p id="sysinfo">狀態載入中... | 系統版本: {{EDITION}}</p>
     </div>
-    <div id="statusBadge" class="badge badge-secondary">狀態載入中</div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <div id="statusBadge" class="badge badge-secondary">狀態載入中</div>
+      <button id="quitBtn" class="btn btn-outline" style="padding:4px 10px;font-size:12px;">⏻ 結束 back-EZ</button>
+    </div>
+  </div>
+
+  <div id="modeBanner" style="display:none;background:#451a03;border:1px solid #b45309;border-radius:8px;padding:12px;margin-bottom:16px;color:#fde68a;font-size:13px;line-height:1.6;">
+    ⚠️ 目前是<strong>預覽模式（DryRun）</strong>：建立／還原都<strong>不會真的執行</strong>。<br>
+    要實際使用，請關閉此視窗，重新執行 <code>啟動.bat</code> 並選 <strong>2（實際模式）</strong>。
   </div>
 
   {{HOME_BANNER}}
@@ -279,6 +287,21 @@ const fullPanelTemplate = `<!DOCTYPE html>
 
   <div id="rpList" class="rp-grid">
     <div style="text-align: center; color: var(--text-muted); padding: 40px;">讀取還原點中...</div>
+  </div>
+
+  <div class="cap-section">
+    <h2>🪟 Windows 內建系統還原（備援）</h2>
+    <div id="srSummary" class="cap-summary">讀取中...</div>
+    <div id="srBlockers" class="cap-blockers"></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0;">
+      <button id="srEnableBtn" class="btn btn-outline" data-sr-action="enable" style="display:none;">開啟／修復系統保護</button>
+      <button id="srCreateBtn" class="btn btn-primary" data-sr-action="create">建立還原點</button>
+      <button id="srRefreshBtn" class="btn btn-outline" data-sr-action="refresh">重新整理</button>
+    </div>
+    <div id="srPoints"></div>
+    <p style="font-size:12px;color:var(--text-muted);margin:10px 0 0;">
+      ⚠ 只還原系統檔、驅動、登錄與已安裝程式，<b>不會還原個人檔案</b>；還原會立即重新開機。
+    </p>
   </div>
 
   <!-- Create Modal -->
@@ -397,6 +420,11 @@ const fullPanelTemplate = `<!DOCTYPE html>
       sysinfo += ' | 模式: ' + (dryRunMode ? '預覽（DryRun，未修改磁碟/BCD）' : '實際');
       document.getElementById('sysinfo').textContent = sysinfo;
 
+      const modeBanner = document.getElementById('modeBanner');
+      if (modeBanner) {
+        modeBanner.style.display = dryRunMode ? 'block' : 'none';
+      }
+
       sysReady = engineReady && !!caps.ready;
       sysBlockReason = '系統能力檢測未通過';
 
@@ -412,7 +440,8 @@ const fullPanelTemplate = `<!DOCTYPE html>
         if (!engineReady) reasonParts.push('VHDX 引擎未就緒');
         if (status && status.engine_warning) reasonParts.push('引擎警告：' + status.engine_warning);
         if (reasonParts.length > 0) sysBlockReason = reasonParts.join('；');
-        summary.innerHTML = '<span style="color: #f87171;">❌ 系統能力檢測未通過，還原操作已停用。</span>';
+        summary.innerHTML = '<span style="color: #f87171;">❌ 系統能力檢測未通過，VHDX 秒級還原已停用。</span>' +
+          '<div style="margin-top:6px;color:#94a3b8;">可先使用下方「Windows 內建系統還原（備援）」；實際操作需要管理員權限與實際模式。</div>';
       }
 
       const blockerBox = document.getElementById('capBlockers');
@@ -586,6 +615,186 @@ const fullPanelTemplate = `<!DOCTYPE html>
       }
     }
 
+    let srStatus = null;
+
+    async function loadSysRestore() {
+      const summary = document.getElementById('srSummary');
+      try {
+        const stRes = await fetch('/api/sysrestore/status');
+        const stBody = await stRes.json().catch(function() { return null; });
+        if (!stRes.ok || !stBody || stBody.ok !== true || !stBody.data) {
+          throw new Error(formatAPIError(stBody && stBody.error, stRes.status));
+        }
+        srStatus = stBody.data;
+
+        let points = [];
+        if (srStatus.is_admin) {
+          const ptRes = await fetch('/api/sysrestore/points');
+          const ptBody = await ptRes.json().catch(function() { return null; });
+          if (ptRes.ok && Array.isArray(ptBody)) {
+            points = ptBody;
+          }
+        }
+        renderSysRestore(srStatus, points);
+      } catch (err) {
+        summary.innerHTML = '<span style="color:#f87171;">無法取得 Windows 系統還原狀態：' + escapeHTML(err.message) + '</span>';
+        document.getElementById('srBlockers').style.display = 'none';
+        document.getElementById('srPoints').innerHTML = '';
+        document.getElementById('srEnableBtn').style.display = 'none';
+      }
+    }
+
+    function renderSysRestore(st, points) {
+      const summary = document.getElementById('srSummary');
+      const blockersBox = document.getElementById('srBlockers');
+      const parts = [];
+      parts.push(st.supported ? '功能可用' : '功能不支援');
+      parts.push('系統保護：' + (st.protection_enabled ? '已開啟' : '未開啟'));
+      parts.push('管理員：' + (st.is_admin ? '是' : '否'));
+      if (st.free_bytes) {
+        parts.push('可用空間：' + (st.free_bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB');
+      }
+      parts.push('還原點：' + (st.point_count || 0) + ' 個');
+      summary.innerHTML = '<span style="color:' + ((st.can_create || st.can_restore) ? '#34d399' : '#f87171') + ';">' +
+        escapeHTML(parts.join('｜')) + '</span>';
+
+      const blockers = Array.isArray(st.blockers) ? st.blockers : [];
+      if (blockers.length === 0) {
+        blockersBox.style.display = 'none';
+        blockersBox.innerHTML = '';
+      } else {
+        blockersBox.style.display = 'block';
+        blockersBox.innerHTML = '<div class="cap-blockers-title">⛔ 無法使用的原因（' + blockers.length + '）</div>' +
+          blockers.map(function(b) {
+            return '<div class="blocker-item">' +
+              '<div class="cap-head">❌ <span class="cap-key">' + escapeHTML(b.key) + '</span></div>' +
+              '<div class="cap-detail">' + escapeHTML(b.message) + '</div>' +
+              (b.fix ? '<div class="cap-fix">修正方式：' + escapeHTML(b.fix) + '</div>' : '') +
+            '</div>';
+          }).join('');
+      }
+
+      // 管理員一律可看到「開啟／修復系統保護」：登錄檔說已開啟，個別磁碟區仍可能未受保護。
+      document.getElementById('srEnableBtn').style.display =
+        (st.is_admin && !dryRunMode) ? 'inline-block' : 'none';
+
+      const pointsBox = document.getElementById('srPoints');
+      if (!Array.isArray(points) || points.length === 0) {
+        pointsBox.innerHTML = '<div style="color:var(--text-muted);padding:12px;">目前沒有系統還原點（或需要管理員權限才能讀取）。</div>';
+      } else {
+        pointsBox.innerHTML = points.map(function(p) {
+          const when = p.created_at ? new Date(p.created_at).toLocaleString() : '時間未知';
+          return '<div class="rp-card" style="margin-bottom:8px;">' +
+            '<div class="rp-info">' +
+              '<h3>' + escapeHTML(p.description || '（無說明）') + '</h3>' +
+              '<p>建立時間：' + escapeHTML(when) + '｜序號：' + escapeHTML(String(p.sequence)) + '</p>' +
+            '</div>' +
+            '<div class="rp-actions">' +
+              '<button class="btn btn-danger" data-sr-action="restore" data-sequence="' + escapeHTML(String(p.sequence)) + '">還原到這台</button>' +
+            '</div>' +
+          '</div>';
+        }).join('');
+      }
+
+      setSysRestoreButtons(st);
+    }
+
+    function setSysRestoreButtons(st) {
+      const createBtn = document.getElementById('srCreateBtn');
+      if (createBtn) {
+        createBtn.disabled = dryRunMode || !st.can_create;
+        createBtn.title = dryRunMode ? '預覽模式：不會真的建立' : (st.can_create ? '' : '目前無法建立（見上方原因）');
+      }
+      Array.prototype.forEach.call(document.querySelectorAll('button[data-sr-action="restore"]'), function(btn) {
+        btn.disabled = dryRunMode || !st.can_restore;
+        if (dryRunMode) {
+          btn.title = '預覽模式：不會真的還原';
+        }
+      });
+    }
+
+    async function createSysRestorePoint() {
+      if (dryRunMode) {
+        showToast('預覽模式：不會真的建立系統還原點', true);
+        return;
+      }
+      const desc = prompt('請輸入還原點說明（例如：安裝驅動前）', 'back-EZ 手動還原點 ' + new Date().toLocaleString());
+      if (desc === null) return;
+      const trimmed = desc.trim();
+      if (!trimmed) {
+        showToast('說明不可為空', true);
+        return;
+      }
+      try {
+        await apiPost('/api/sysrestore/create', { description: trimmed });
+        showToast('Windows 系統還原點已建立', false);
+        refreshAll();
+      } catch (err) {
+        showToast('建立失敗：' + err.message, true);
+      }
+    }
+
+    async function restoreSysRestorePoint(sequence) {
+      if (dryRunMode) {
+        showToast('預覽模式：不會真的還原', true);
+        return;
+      }
+      const typed = prompt('這會「立即重新開機」並還原系統檔與設定，但不會還原個人檔案。\n若確定，請輸入 RESTORE：');
+      if (typed === null) return;
+      if (typed.trim() !== 'RESTORE') {
+        showToast('未輸入 RESTORE，已取消', true);
+        return;
+      }
+      try {
+        await apiPost('/api/sysrestore/restore', { sequence: Number(sequence), confirm: 'RESTORE' });
+        showToast('已送出還原指令，系統即將重新開機…', false);
+      } catch (err) {
+        showToast('還原失敗：' + err.message, true);
+      }
+    }
+
+    async function enableSysRestore() {
+      if (dryRunMode) {
+        showToast('預覽模式：不會開啟系統保護', true);
+        return;
+      }
+      if (!confirm('開啟系統保護會使用一些磁碟空間（由 Windows 決定），確定要開啟嗎？')) return;
+      try {
+        await apiPost('/api/sysrestore/enable', { drive: 'C:\\' });
+        showToast('系統保護已開啟', false);
+        refreshAll();
+      } catch (err) {
+        showToast('開啟失敗：' + err.message, true);
+      }
+    }
+
+    document.addEventListener('click', function(event) {
+      const btn = event.target.closest('button[data-sr-action]');
+      if (!btn || btn.disabled) return;
+      const action = btn.getAttribute('data-sr-action');
+      if (action === 'enable') {
+        enableSysRestore();
+      } else if (action === 'create') {
+        createSysRestorePoint();
+      } else if (action === 'refresh') {
+        refreshAll();
+      } else if (action === 'restore') {
+        restoreSysRestorePoint(btn.getAttribute('data-sequence'));
+      }
+    });
+
+    async function quitBackEZ() {
+      if (!confirm('確定要結束 back-EZ 控制台嗎？\n結束後要再開啟，請重新執行 啟動.bat。')) return;
+      try {
+        await apiPost('/api/system/shutdown', {});
+        showToast('已結束 back-EZ，請關閉此視窗。', false);
+      } catch (err) {
+        showToast('結束失敗：' + err.message, true);
+      }
+    }
+
+    document.getElementById('quitBtn').addEventListener('click', quitBackEZ);
+
     function openLogsModal() {
       document.getElementById('logsModal').style.display = 'flex';
       loadLogs();
@@ -626,7 +835,7 @@ const fullPanelTemplate = `<!DOCTYPE html>
     async function refreshAll() {
       // 先取得能力狀態再渲染清單，避免還原點按鈕用到過期的 sysReady。
       await loadStatus();
-      await loadPoints();
+      await Promise.all([loadPoints(), loadSysRestore()]);
     }
 
     document.getElementById('rpList').addEventListener('click', function(event) {

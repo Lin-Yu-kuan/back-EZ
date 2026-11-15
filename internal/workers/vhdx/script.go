@@ -24,6 +24,9 @@ type ExecutionPlan struct {
 	DiskpartScript string          `json:"diskpart_script,omitempty"`
 	Steps          []ExecutionStep `json:"steps"`
 	GeneratedAt    string          `json:"generated_at"`
+	// RequiresReboot is true for real create/switch operations: the new VHDX
+	// layer only becomes the booted system after a reboot.
+	RequiresReboot bool `json:"requires_reboot,omitempty"`
 }
 
 // BatchScript generates a runnable Windows batch (.cmd) script for the execution plan.

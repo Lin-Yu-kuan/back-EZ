@@ -22,6 +22,7 @@
 2. **中控台凍結、不得刪碼**：`internal/hub`、`web/` 及相關入口（`cmd/hub`、`cmd/mockagent`、`cmd/gen-ts`）凍結；不新增功能、不驗收，但**不得刪除**任何中控台程式碼或測試。解凍需重新排程並更新 [`TASKS.md`](./TASKS.md)（凍結點見 lightweight tag `hub-frozen`）。
 3. **測試分流**：本機工作的提交前測試一律跑 `pwsh -NoProfile -File scripts/test-local.ps1`（僅涵蓋本機套件，不含中控台；本機若無 PowerShell 7，改用 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-local.ps1`，腳本同時相容 5.1）。中控台測試不在現階段 DoD 內，但也**不得**刪除或停用；§5 的全專案檢核於解凍後才恢復為必要條件。
 4. **fail-closed**：本機還原的真實寫入在 B 案（真實執行）完成前一律 fail-closed——A 案期間 `RealExecutionEnabled=false`，任何真實 `diskpart`／BCD 寫入一律拒絕，**不得回報假成功**（DryRun 成功不代表真實執行成功）。本機密碼驗證暫以「提權 ＋ `X-BackEZ-Token` ＋ `Origin` 同源檢查」替代，與 SPEC §3.4／§4.3「本機變更操作需管理員密碼」的差異已知，待 B 案補齊，文件與 UI 必須誠實標註（見 D9）。
+5. **兩套本機機制並存**：VHDX 秒級還原（長期，B 案）與 Windows 內建系統還原（備援，D10）各自獨立；Windows 還原點不得寫入 `chain.json`，VHDX 節點也不得混入系統還原清單。
 
 ---
 

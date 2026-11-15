@@ -36,6 +36,12 @@ type Engine struct {
 	chain       *Chain
 	executor    CommandExecutor
 	loadWarning string
+
+	// Real-execution backends. They are only used when DryRun=false and
+	// RealExecutionEnabled=true; tests inject fakes here.
+	disk DiskBackend
+	bcd  BCDBackend
+	live *LiveLayer
 }
 
 // VHDXError wraps error with protocol-compliant error code.
@@ -88,6 +94,20 @@ func NewEngine(cfg Config, exec CommandExecutor) (*Engine, error) {
 		chain:       chain,
 		executor:    exec,
 		loadWarning: loadWarning,
+		disk:        NewDiskBackend(),
+		bcd:         NewBCDBackend(),
+	}
+
+	if cfg.DataDir != "" {
+		live, liveErr := loadLiveLayer(filepath.Join(cfg.DataDir, "live.json"))
+		switch {
+		case liveErr == nil:
+			eng.live = live
+		case errors.Is(liveErr, os.ErrNotExist):
+			// 尚未完成 VHDX 原生開機建置。
+		default:
+			return nil, fmt.Errorf("failed to load live layer metadata: %w", liveErr)
+		}
 	}
 
 	if len(chain.Points) > 0 {
@@ -102,7 +122,22 @@ func NewEngine(cfg Config, exec CommandExecutor) (*Engine, error) {
 		}
 	}
 
+	if !cfg.DryRun && cfg.RealExecutionEnabled {
+		eng.reconcileLiveLocked()
+	}
+
 	return eng, nil
+}
+
+// Live returns a copy of the live-layer metadata, or nil when not provisioned.
+func (e *Engine) Live() *LiveLayer {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.live == nil {
+		return nil
+	}
+	clone := *e.live
+	return &clone
 }
 
 // LoadWarning 回傳載入期間發生的可復原問題（例如舊格式遷移、鏈損壞）。
@@ -355,6 +390,10 @@ func (e *Engine) Create(req CreateRequest) (*protocol.RestorePoint, *ExecutionPl
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	if !e.cfg.DryRun && e.cfg.RealExecutionEnabled {
+		return e.createRealLocked(req)
+	}
+
 	// 1. Determine parent
 	var parent *protocol.RestorePoint
 	if req.ParentID != nil && *req.ParentID != "" {
@@ -464,6 +503,10 @@ func (e *Engine) Switch(pointID string) (*ExecutionPlan, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	if !e.cfg.DryRun && e.cfg.RealExecutionEnabled {
+		return e.switchRealLocked(pointID)
+	}
+
 	target := e.chain.GetPoint(pointID)
 	if target == nil {
 		return nil, &VHDXError{
@@ -512,6 +555,10 @@ func (e *Engine) Switch(pointID string) (*ExecutionPlan, error) {
 func (e *Engine) Delete(pointID string) (*ExecutionPlan, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	if !e.cfg.DryRun && e.cfg.RealExecutionEnabled {
+		return e.deleteRealLocked(pointID)
+	}
 
 	target := e.chain.GetPoint(pointID)
 	if target == nil {
